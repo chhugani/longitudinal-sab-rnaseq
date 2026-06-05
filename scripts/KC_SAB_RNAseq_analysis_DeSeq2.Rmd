@@ -1,0 +1,4263 @@
+---
+title: "KC_SAB_RNAseq_analysis_DeSeq2"
+output: html_document
+date: "2025-10-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+#Persistent vs Resolving
+## --- Packages ---
+library(DESeq2)
+library(readr)
+library(dplyr)
+
+## --- Paths ---
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+coldata_path <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/KC_SAB_RNAseq_coldata_updated.csv"
+out_path     <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Persistent_vs_Resolving_PARTEK_MIRROR.csv"
+
+## --- 1. Load and clean counts ---
+
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+
+# Drop featureCounts summary rows like __no_feature, __ambiguous, etc. (if any)
+counts_raw <- counts_raw[!grepl("^__", counts_raw$Geneid), ]
+
+# Split annotation vs counts
+counts_mat <- counts_raw[, -(1:6)]
+rownames(counts_mat) <- counts_raw$Geneid
+
+# Coerce to numeric
+counts_mat <- as.matrix(counts_mat)
+mode(counts_mat) <- "numeric"
+
+# Sanity check for NAs before subsetting
+na_rows_global <- rowSums(is.na(counts_mat)) > 0
+cat("Global NA rows in counts_mat:", sum(na_rows_global), "\n")
+
+# Drop any genes with NA counts (those 6 rows)
+counts_mat <- counts_mat[!na_rows_global, , drop = FALSE]
+
+## --- 2. Load metadata ---
+
+coldata <- read.csv(coldata_path, check.names = FALSE, stringsAsFactors = FALSE)
+
+# Standardize sample column name
+if ("Sample Name" %in% colnames(coldata)) {
+  colnames(coldata)[colnames(coldata) == "Sample Name"] <- "Sample"
+}
+
+# Strip ".bam" suffix everywhere
+colnames(counts_mat) <- gsub("\\.bam$", "", colnames(counts_mat))
+coldata$Sample       <- gsub("\\.bam$", "", coldata$Sample)
+
+## --- 3. Day 1 subset and sample matching ---
+
+coldata_d1 <- subset(coldata, Day == 1)
+rownames(coldata_d1) <- coldata_d1$Sample
+
+common_samps <- intersect(colnames(counts_mat), rownames(coldata_d1))
+cat("Day 1 samples in DESeq2:", length(common_samps), "\n")
+
+counts_d1   <- counts_mat[, common_samps, drop = FALSE]
+coldata_d1  <- coldata_d1[common_samps, , drop = FALSE]
+
+# Quick NA check on Day 1 subset
+cat("NA rows in Day1 subset:", sum(rowSums(is.na(counts_d1)) > 0), "\n")
+
+## --- 4. Factor settings (Status: Persistent as reference) ---
+
+coldata_d1$Status <- factor(coldata_d1$Status,
+                            levels = c("Persistent", "Resolving"))
+coldata_d1$Status <- droplevels(coldata_d1$Status)
+
+## --- 5. Build DESeq2 object ---
+
+dds_d1 <- DESeqDataSetFromMatrix(
+  countData = round(counts_d1),
+  colData   = coldata_d1,
+  design    = ~ Status
+)
+
+## --- 6. Apply mean-count filter >= 1 (Partek lowest coverage filter) ---
+
+keep <- rowMeans(counts(dds_d1)) >= 1
+dds_d1 <- dds_d1[keep, ]
+
+## --- 7. Run DESeq2 ---
+
+dds_d1 <- DESeq(dds_d1)
+
+## --- 8. Results: Persistent vs Resolving ---
+
+res_d1 <- results(dds_d1, contrast = c("Status", "Persistent", "Resolving"))
+
+# Drop rows with NA padj (unreliable estimates)
+res_d1 <- res_d1[!is.na(res_d1$padj), ]
+
+# Order and save
+res_out_d1 <- as.data.frame(res_d1) %>%
+  arrange(padj)
+
+write.csv(res_out_d1, out_path, row.names = TRUE)
+
+cat("Finished Day 1 DESeq2 Persistent vs Resolving.\n",
+    "Results written to:\n", out_path, "\n")
+
+
+```
+
+```{r}
+#Converting ensembl genes to gene symbols, just need to replace res_outd1/d3
+res_out_d1$ensembl_clean <- sub("\\..*", "", rownames(res_out_d1))
+
+library(biomaRt)
+
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")
+
+mapping <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = res_out_d1$ensembl_clean,
+  mart = mart
+)
+
+res_annotated <- res_out_d1 %>%
+  mutate(ensembl_gene_id = ensembl_clean) %>%
+  left_join(mapping, by = "ensembl_gene_id") %>%
+  select(hgnc_symbol, everything())
+
+write.csv(
+  res_annotated,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Persistent_vs_Resolving_Annotated.csv",
+  row.names = FALSE
+)
+
+```
+
+```{r}
+#Day 3 Persistent vs Resolving
+
+## --- Packages ---
+library(DESeq2)
+library(readr)
+library(dplyr)
+
+## --- Paths ---
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+coldata_path <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/KC_SAB_RNAseq_coldata_updated.csv"
+out_path_3   <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_PARTEK_MIRROR.csv"
+
+## --- 1. Load and clean counts ---
+
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+
+# Drop featureCounts summary rows like __no_feature, __ambiguous, etc. (if any)
+counts_raw <- counts_raw[!grepl("^__", counts_raw$Geneid), ]
+
+# Split annotation vs counts
+counts_mat <- counts_raw[, -(1:6)]
+rownames(counts_mat) <- counts_raw$Geneid
+
+# Coerce to numeric
+counts_mat <- as.matrix(counts_mat)
+mode(counts_mat) <- "numeric"
+
+# Sanity check for NAs before subsetting
+na_rows_global <- rowSums(is.na(counts_mat)) > 0
+cat("Global NA rows in counts_mat:", sum(na_rows_global), "\n")
+
+# Drop any genes with NA counts
+counts_mat <- counts_mat[!na_rows_global, , drop = FALSE]
+
+## --- 2. Load metadata ---
+
+coldata <- read.csv(coldata_path, check.names = FALSE, stringsAsFactors = FALSE)
+
+# Standardize sample column name
+if ("Sample Name" %in% colnames(coldata)) {
+  colnames(coldata)[colnames(coldata) == "Sample Name"] <- "Sample"
+}
+
+# Strip ".bam" suffix everywhere (must match how Day 1 worked)
+colnames(counts_mat) <- gsub("\\.bam$", "", colnames(counts_mat))
+coldata$Sample       <- gsub("\\.bam$", "", coldata$Sample)
+
+## --- 3. Day 3 subset and sample matching ---
+
+coldata_d3 <- subset(coldata, Day == 3)
+rownames(coldata_d3) <- coldata_d3$Sample
+
+common_samps_3 <- intersect(colnames(counts_mat), rownames(coldata_d3))
+cat("Day 3 samples in DESeq2:", length(common_samps_3), "\n")
+
+counts_d3  <- counts_mat[, common_samps_3, drop = FALSE]
+coldata_d3 <- coldata_d3[common_samps_3, , drop = FALSE]
+
+# Quick NA check on Day 3 subset
+cat("NA rows in Day 3 subset:", sum(rowSums(is.na(counts_d3)) > 0), "\n")
+
+## --- 4. Factor settings (Status: Persistent as reference) ---
+
+coldata_d3$Status <- factor(coldata_d3$Status,
+                            levels = c("Persistent", "Resolving"))
+coldata_d3$Status <- droplevels(coldata_d3$Status)
+
+## --- 5. Build DESeq2 object ---
+
+dds_d3 <- DESeqDataSetFromMatrix(
+  countData = round(counts_d3),
+  colData   = coldata_d3,
+  design    = ~ Status
+)
+
+## --- 6. Apply mean-count filter >= 1 (Partek lowest coverage filter) ---
+
+keep_3 <- rowMeans(counts(dds_d3)) >= 1
+dds_d3 <- dds_d3[keep_3, ]
+
+## --- 7. Run DESeq2 ---
+
+dds_d3 <- DESeq(dds_d3)
+
+## --- 8. Results: Resolving vs Persistent (Day 3) ---
+
+res_d3 <- results(dds_d3, contrast = c("Status", "Persistent", "Resolving"))
+
+# Drop rows with NA padj (unreliable estimates)
+res_d3 <- res_d3[!is.na(res_d3$padj), ]
+
+# Order and save
+res_out_d3 <- as.data.frame(res_d3) %>%
+  arrange(padj)
+
+write.csv(res_out_d3, out_path_3, row.names = TRUE)
+
+cat("Finished Day 3 DESeq2 Persistent vs Resolving.\n",
+    "Results written to:\n", out_path_3, "\n")
+
+```
+
+```{r}
+#applying thresholds for p value or lfc cutoffs  
+library(dplyr)
+library(readr)
+
+# Load your DESeq2 results
+deseq <- read_csv("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_Annotated.csv")
+
+# Rename columns if needed
+# deseq <- deseq %>% rename(pvalue = padj)  # only if using adjusted p-values
+
+# Apply Partek thresholds: p < 0.05, |LFC| >= 2
+deseq_sig <- deseq %>%
+  filter(pvalue < 0.05)
+
+# Save file
+write_csv(deseq_sig, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_p0.05.csv")
+
+deseq_sig
+
+```
+
+
+```{r}
+
+#volcano plot, padj
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+library(readr)
+
+volcano_from_csv <- function(csv_file,
+                             gene_col = "symbol",
+                             lfc_col  = "log2FoldChange",
+                             padj_col = "padj",
+                             title    = "",
+                             outfile  = "",
+                             p_cutoff = 0.05,
+                             lfc_cutoff = 1) {
+
+  # Load CSV
+  df <- read_csv(csv_file, show_col_types = FALSE)
+
+  # Rename for convenience
+  df <- df %>%
+    rename(
+      gene = !!gene_col,
+      lfc  = !!lfc_col,
+      padj = !!padj_col
+    )
+
+  # Remove missing padj
+  df <- df %>% filter(!is.na(padj))
+
+  # Compute -log10(padj)
+  df$neglog10padj <- -log10(df$padj)
+
+  # Sig flag
+  df$sig <- with(df, padj < p_cutoff & abs(lfc) >= lfc_cutoff)
+
+  # Label only significant
+  df$label <- ifelse(df$sig, df$gene, NA)
+
+  # Volcano plot
+  p <- ggplot(df, aes(x = lfc, y = neglog10padj)) +
+    geom_point(aes(alpha = sig), size = 1.5) +
+    scale_alpha_manual(values = c(`FALSE` = 0.3, `TRUE` = 1)) +
+    geom_vline(xintercept = c(-lfc_cutoff, lfc_cutoff), linetype = "dashed") +
+    geom_hline(yintercept = -log10(p_cutoff), linetype = "dashed") +
+    ggrepel::geom_text_repel(
+      aes(label = label),
+      size = 3,
+      max.overlaps = 30,
+      na.rm = TRUE
+    ) +
+    labs(
+      title = title,
+      x = "log2 Fold Change (Persistent vs Resolving)",
+      y = "-log10(adjusted p-value)"
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(hjust = 0.5)
+    )
+
+  if (outfile != "") {
+    ggsave(outfile, p, width = 6, height = 5, dpi = 300)
+  }
+
+  return(p)
+}
+
+```
+
+```{r}
+#Day 1 volcano plot
+volcano_from_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Persistent_vs_Resolving_Annotated.csv",
+  gene_col = "hgnc_symbol",            # CHANGE if needed
+  lfc_col  = "log2FoldChange",
+  padj_col = "padj",
+  title    = "Day 1: Persistent vs Resolving",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/Volcano_Day1_PvsR.png"
+)
+
+```
+
+```{r}
+#Day 3 volcano plot
+volcano_from_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_Annotated.csv",
+  gene_col = "hgnc_symbol",            # CHANGE if needed
+  lfc_col  = "log2FoldChange",
+  padj_col = "padj",
+  title    = "Day 3: Persistent vs Resolving",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/Volcano_Day3_PvsR.png"
+)
+
+```
+```{r}
+#p value < 0.05, 2lfc
+volcano_from_csv <- function(csv_file,
+                             gene_col = "hgnc_symbol",
+                             lfc_col  = "log2FoldChange",
+                             p_col    = "pvalue",        # raw p-value
+                             title    = "",
+                             outfile  = "",
+                             p_cutoff = 0.05,
+                             lfc_cutoff = 2,
+                             n_label_up = 15,            # how many to label
+                             n_label_down = 15) {
+
+  library(dplyr)
+  library(readr)
+  library(ggplot2)
+  library(ggrepel)
+
+  df <- read_csv(csv_file, show_col_types = FALSE)
+
+  df <- df %>%
+    rename(
+      gene = !!gene_col,
+      lfc  = !!lfc_col,
+      pval = !!p_col
+    ) %>%
+    filter(!is.na(pval))
+
+  df$neglog10p <- -log10(df$pval)
+
+  # Direction categories
+  df$direction <- "NS"
+  df$direction[df$pval < p_cutoff & df$lfc >=  lfc_cutoff]  <- "Up in Persistent"
+  df$direction[df$pval < p_cutoff & df$lfc <= -lfc_cutoff]  <- "Up in Resolving"
+
+  df$direction <- factor(df$direction,
+                         levels = c("Up in Resolving", "NS", "Up in Persistent"))
+
+  # Choose which genes to label: top N up & down by p-value
+  up_labels <- df %>%
+    filter(direction == "Up in Persistent") %>%
+    arrange(pval) %>%
+    head(n_label_up) %>%
+    pull(gene)
+
+  down_labels <- df %>%
+    filter(direction == "Up in Resolving") %>%
+    arrange(pval) %>%
+    head(n_label_down) %>%
+    pull(gene)
+
+  label_genes <- c(up_labels, down_labels)
+
+  df$label <- ifelse(df$gene %in% label_genes, df$gene, NA)
+
+  p <- ggplot(df, aes(x = lfc, y = neglog10p)) +
+    geom_point(aes(color = direction), size = 1.5, alpha = 0.8) +
+    scale_color_manual(values = c("Up in Resolving" = "#1f78b4",
+                                  "NS"              = "grey80",
+                                  "Up in Persistent"= "#e31a1c")) +
+    geom_vline(xintercept = c(-lfc_cutoff, lfc_cutoff), linetype = "dashed") +
+    geom_hline(yintercept = -log10(p_cutoff), linetype = "dashed") +
+    ggrepel::geom_text_repel(
+      aes(label = label),
+      size = 3,
+      max.overlaps = 50,
+      box.padding = 0.3,
+      point.padding = 0.2,
+      segment.size = 0.25,
+      na.rm = TRUE
+    ) +
+    labs(
+      title = title,
+      x = "log2 Fold Change (Persistent vs Resolving)",
+      y = "-log10(p-value)",
+      color = ""
+    ) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      plot.title = element_text(hjust = 0.5),
+      legend.position = "top"
+    )
+
+  if (outfile != "") {
+    ggsave(outfile, p, width = 6, height = 5, dpi = 300)
+  }
+
+  p
+}
+
+```
+
+```{r}
+#Day 1 Volcano plot
+volcano_from_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Persistent_vs_Resolving_Annotated.csv",
+  gene_col = "hgnc_symbol",
+  lfc_col  = "log2FoldChange",
+  p_col    = "pvalue",
+  title    = "Day 1: Persistent vs Resolving (p<0.05, |LFC|≥2)",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/Volcano_Day1_LFC2_p005_pretty.png",
+  n_label_up = 15,
+  n_label_down = 15
+)
+
+```
+
+```{r}
+#Day 3 Volcano plot
+volcano_from_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_Annotated.csv",
+  gene_col = "hgnc_symbol",
+  lfc_col  = "log2FoldChange",
+  p_col    = "pvalue",
+  title    = "Day 3: Persistent vs Resolving (p<0.05, |LFC|≥2)",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/Volcano_Day3_LFC2_p005_pretty.png",
+  n_label_up = 15,
+  n_label_down = 15
+)
+
+```
+
+```{r}
+#Resolving vs Persistent
+## --- Packages ---
+library(DESeq2)
+library(readr)
+library(dplyr)
+
+## --- Paths ---
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+coldata_path <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/KC_SAB_RNAseq_coldata_updated.csv"
+out_path     <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Resolving_vs_Persistent_PARTEK_MIRROR.csv"
+
+## --- 1. Load and clean counts ---
+
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+
+# Drop featureCounts summary rows like __no_feature, __ambiguous, etc. (if any)
+counts_raw <- counts_raw[!grepl("^__", counts_raw$Geneid), ]
+
+# Split annotation vs counts
+counts_mat <- counts_raw[, -(1:6)]
+rownames(counts_mat) <- counts_raw$Geneid
+
+# Coerce to numeric
+counts_mat <- as.matrix(counts_mat)
+mode(counts_mat) <- "numeric"
+
+# Sanity check for NAs before subsetting
+na_rows_global <- rowSums(is.na(counts_mat)) > 0
+cat("Global NA rows in counts_mat:", sum(na_rows_global), "\n")
+
+# Drop any genes with NA counts (those 6 rows)
+counts_mat <- counts_mat[!na_rows_global, , drop = FALSE]
+
+## --- 2. Load metadata ---
+
+coldata <- read.csv(coldata_path, check.names = FALSE, stringsAsFactors = FALSE)
+
+# Standardize sample column name
+if ("Sample Name" %in% colnames(coldata)) {
+  colnames(coldata)[colnames(coldata) == "Sample Name"] <- "Sample"
+}
+
+# Strip ".bam" suffix everywhere
+colnames(counts_mat) <- gsub("\\.bam$", "", colnames(counts_mat))
+coldata$Sample       <- gsub("\\.bam$", "", coldata$Sample)
+
+## --- 3. Day 1 subset and sample matching ---
+
+coldata_d1 <- subset(coldata, Day == 1)
+rownames(coldata_d1) <- coldata_d1$Sample
+
+common_samps <- intersect(colnames(counts_mat), rownames(coldata_d1))
+cat("Day 1 samples in DESeq2:", length(common_samps), "\n")
+
+counts_d1   <- counts_mat[, common_samps, drop = FALSE]
+coldata_d1  <- coldata_d1[common_samps, , drop = FALSE]
+
+# Quick NA check on Day 1 subset
+cat("NA rows in Day1 subset:", sum(rowSums(is.na(counts_d1)) > 0), "\n")
+
+## --- 4. Factor settings (Status: Persistent as reference) ---
+
+coldata_d1$Status <- factor(coldata_d1$Status,
+                            levels = c("Resolving", "Persistent"))
+coldata_d1$Status <- droplevels(coldata_d1$Status)
+
+## --- 5. Build DESeq2 object ---
+
+dds_d1 <- DESeqDataSetFromMatrix(
+  countData = round(counts_d1),
+  colData   = coldata_d1,
+  design    = ~ Status
+)
+
+## --- 6. Apply mean-count filter >= 1 (Partek lowest coverage filter) ---
+
+keep <- rowMeans(counts(dds_d1)) >= 1
+dds_d1 <- dds_d1[keep, ]
+
+## --- 7. Run DESeq2 ---
+
+dds_d1 <- DESeq(dds_d1)
+
+## --- 8. Results: Resolving vs Persistent ---
+
+res_d1 <- results(dds_d1, contrast = c("Status", "Resolving", "Persistent"))
+
+# Drop rows with NA padj (unreliable estimates)
+res_d1 <- res_d1[!is.na(res_d1$padj), ]
+
+# Order and save
+res_out_d1 <- as.data.frame(res_d1) %>%
+  arrange(padj)
+
+write.csv(res_out_d1, out_path, row.names = TRUE)
+
+cat("Finished Day 1 DESeq2 Resolving vs Persistent.\n",
+    "Results written to:\n", out_path, "\n")
+
+```
+```{r}
+#Day 1 Volcano plot
+volcano_from_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day1_Resolving_vs_Persistent_Annotated.csv",
+  gene_col = "hgnc_symbol",
+  lfc_col  = "log2FoldChange",
+  p_col    = "pvalue",
+  title    = "Day 1: Resolving vs Persistent (p<0.05, |LFC|≥2)",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/Volcano_Day1_RP_LFC2_p005_pretty.png",
+  n_label_up = 15,
+  n_label_down = 15
+)
+```
+
+```{r}
+#heatmaps
+library(DESeq2)
+library(pheatmap)
+library(dplyr)
+library(readr)
+
+heatmap_from_annotated_csv <- function(csv_file,
+                                       dds,
+                                       title,
+                                       outfile,
+                                       p_cutoff   = 0.05,
+                                       lfc_cutoff = 2,
+                                       max_genes  = 50) {
+
+  # ---- 1. Read annotated results ----
+  ann <- read_csv(csv_file, show_col_types = FALSE)
+
+  # Sanity check: required columns
+  stopifnot(all(c("pvalue", "log2FoldChange", "ensembl_gene_id", "hgnc_symbol") %in% colnames(ann)))
+
+  # Filter by your thresholds (use pvalue; swap to padj if you prefer)
+  ann_filt <- ann %>%
+    filter(!is.na(pvalue),
+           !is.na(log2FoldChange),
+           pvalue < p_cutoff,
+           abs(log2FoldChange) >= lfc_cutoff,
+           !is.na(ensembl_gene_id))
+
+  if (nrow(ann_filt) == 0) {
+    message("No genes pass thresholds in annotated CSV; no heatmap created.")
+    return(invisible(NULL))
+  }
+
+  # Order by p-value and take top N
+  ann_filt <- ann_filt %>% arrange(pvalue)
+  top_ann  <- head(ann_filt, max_genes)
+
+  # ---- 2. Get VST expression from DESeq2 object ----
+  vsd <- vst(dds, blind = FALSE)
+  mat <- assay(vsd)
+
+  # *** Make dds rownames Ensembl-clean (strip version) ***
+  ensembl_clean <- sub("\\..*", "", rownames(mat))
+  rownames(mat) <- ensembl_clean
+
+  # Keep genes in the same order as top_ann (nice for plotting)
+  genes_use <- top_ann$ensembl_gene_id[top_ann$ensembl_gene_id %in% rownames(mat)]
+
+  if (length(genes_use) == 0) {
+    message("No overlap between dds rownames and annotated ensembl_gene_id.")
+    return(invisible(NULL))
+  }
+
+  mat_sub <- mat[genes_use, , drop = FALSE]
+
+  # ---- 3. Use HGNC symbols as rownames where available ----
+  sym_map <- ann_filt %>%
+    select(ensembl_gene_id, hgnc_symbol) %>%
+    distinct()
+
+  row_syms <- sym_map$hgnc_symbol[match(genes_use, sym_map$ensembl_gene_id)]
+
+  # fallback to Ensembl if symbol is missing
+  rownames(mat_sub) <- ifelse(is.na(row_syms) | row_syms == "",
+                              genes_use,
+                              row_syms)
+
+  # Row-wise z-score
+  mat_z <- t(scale(t(mat_sub)))
+
+  # ---- 4. Column annotation (Status + Day + Age + Sex) ----
+  col_md <- as.data.frame(colData(dds))
+
+  cols_to_use <- intersect(c("Status", "Age", "Sex"),
+                           colnames(col_md))
+
+  col_anno <- col_md[, cols_to_use, drop = FALSE]
+
+  # Ensure annotation rows match column order of mat_z
+  col_anno <- col_anno[colnames(mat_z), , drop = FALSE]
+
+  # ---- 5. Plot heatmap ----
+  pheatmap(mat_z,
+           annotation_col = col_anno,
+           show_rownames = TRUE,
+           fontsize_row = 6,
+           main = title,
+           filename = outfile,
+           width = 6,
+           height = 8)
+}
+
+```
+
+```{r}
+heatmap_from_annotated_csv(
+  csv_file = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DESeq2_Day3_Persistent_vs_Resolving_Annotated.csv",
+  dds      = dds_d3,  # your Day 1 DESeq2 object
+  title    = "Day 3: Persistent vs Resolving",
+  outfile  = "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/Figures/DESeq2_Day3_PvR_heatmap.png"
+)
+
+```
+
+
+```{r}
+
+#LRT deseq2 analysis 11.20.25
+
+library(DESeq2)
+library(dplyr)
+library(readr)
+
+library(readr)
+library(dplyr)
+
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+
+# 1) Read featureCounts output
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+
+# 2) Drop summary rows (__no_feature, etc.)
+counts_raw <- counts_raw[!grepl("^__", counts_raw$Geneid), ]
+
+# 3) Keep only count columns (drop first 6 annotation columns)
+cts_df <- counts_raw[, -(1:6)]
+rownames(cts_df) <- counts_raw$Geneid
+
+# 4) Force ALL count columns to numeric and replace NAs with 0
+cts_df <- as.data.frame(cts_df)
+
+cts_df[] <- lapply(cts_df, function(x) {
+  x <- as.character(x)                      # handle factors/characters
+  x <- suppressWarnings(as.numeric(x))      # convert to numeric
+  x[is.na(x)] <- 0                          # any weird/non-numeric → 0
+  x
+})
+
+# 5) Convert to matrix for DESeq2
+cts <- as.matrix(cts_df)
+storage.mode(cts) <- "integer"
+
+# 6) Sanity checks
+anyNA(cts)        # should now be FALSE
+dim(cts)
+cts[1:5, 1:5]
+
+```
+```{r}
+coldata_path <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/KC_SAB_RNAseq_coldata_updated.csv"
+
+coldata <- read.csv(coldata_path, stringsAsFactors = FALSE)
+
+coldata <- coldata %>%
+  filter(Day %in% c(1, 3, 5, 7)) %>%
+  mutate(
+    Sample  = Sample.Name,
+    Subject = factor(sub("-.*", "", Sample.Name)),
+    Status  = factor(Status, levels = c("Resolving", "Persistent")),
+    Day     = factor(Day, levels = c(1, 3, 5, 7))
+  )
+
+common <- intersect(colnames(cts), coldata$Sample)
+cts     <- cts[, common, drop = FALSE]
+coldata <- coldata[match(common, coldata$Sample), , drop = FALSE]
+
+stopifnot(all(colnames(cts) == coldata$Sample))
+
+```
+
+```{r}
+library(DESeq2)
+
+dds <- DESeqDataSetFromMatrix(
+  countData = cts,
+  colData   = coldata,
+  design    = ~ Status + Day + Status:Day
+)
+
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds  <- dds[keep, ]
+
+dds_lrt <- DESeq(
+  dds,
+  test    = "LRT",
+  reduced = ~ Status + Day   # no interaction
+)
+
+resLRT <- results(dds_lrt)
+summary(resLRT)
+
+
+```
+```{r}
+resLRT <- results(dds_lrt)
+
+# Drop NAs and order by p-value
+resLRT_ord <- resLRT[order(resLRT$pvalue), ]
+resLRT_ord <- resLRT_ord[!is.na(resLRT_ord$pvalue), ]
+
+# Take top 50 / 100 genes by interaction p-value
+top50_genes  <- rownames(resLRT_ord)[1:50]
+top100_genes <- rownames(resLRT_ord)[1:100]
+
+head(resLRT_ord[1:10, ])
+
+```
+
+```{r}
+resLRT_ord <- resLRT[order(resLRT$pvalue), ]
+resLRT_ord <- resLRT_ord[!is.na(resLRT_ord$pvalue), ]
+
+top50_genes  <- rownames(resLRT_ord)[1:50]
+top100_genes <- rownames(resLRT_ord)[1:100]
+
+```
+
+
+```{r}
+library(pheatmap)
+library(biomaRt)
+library(dplyr)
+
+# variance-stabilized counts
+vsd <- vst(dds_lrt, blind = FALSE)
+
+# metadata from dds_lrt
+cd <- as.data.frame(colData(dds_lrt))
+
+# order samples: first by Subject (patient), then by Day (1,3,5,7)
+cd$Day_num <- as.numeric(as.character(cd$Day))  # convert factor -> numeric
+ord <- with(cd, order(Subject, Day_num))
+
+# apply ordering to matrix and annotation
+mat <- assay(vsd)[top50_genes, ord]   # or top100_genes, etc.
+mat <- t(scale(t(mat)))               # z-score per gene
+
+ann <- cd[ord, c("Day", "Status")]
+rownames(ann) <- colnames(vsd)[ord]
+
+
+```
+```{r}
+# clean Ensembl IDs (remove version)
+ens_clean <- sub("\\..*", "", rownames(mat))
+
+# build mapping (run once; reuse 'mapping' later if you want)
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")
+
+mapping <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters     = "ensembl_gene_id",
+  values      = ens_clean,
+  mart        = mart
+)
+
+# match and create labels
+symbol_vec <- mapping$hgnc_symbol[match(ens_clean, mapping$ensembl_gene_id)]
+
+# fallback to Ensembl if symbol missing/blank
+gene_labels <- ifelse(is.na(symbol_vec) | symbol_vec == "",
+                      ens_clean,
+                      symbol_vec)
+
+rownames(mat) <- gene_labels
+
+```
+
+```{r}
+ann_colors <- list(
+  Day = c(
+    "1" = "#FFC20A",  # yellow
+    "3" = "#0C7BDC",  # blue
+    "5" = "#8A2BE2",  # purple
+    "7" = "#009E73"   # green
+  ),
+  Status = c(
+    "Resolving" = "#999999",  # gray
+    "Persistent" = "#E31A1C"  # strong red
+  )
+)
+
+```
+
+```{r}
+pheatmap(
+  mat,
+  annotation_col   = ann,
+  annotation_colors = ann_colors,
+  cluster_cols     = FALSE,   # keep your patient/time ordering
+  cluster_rows     = TRUE,    # or FALSE if you want fixed gene order
+  show_rownames    = TRUE,
+  fontsize_row     = 6,
+  fontsize_col     = 6
+)
+
+```
+
+
+```{r}
+
+pdf("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2.heatmap_fixed.pdf", width = 24, height = 12)
+
+pheatmap(
+  mat,
+  annotation_col   = ann_ordered,
+  annotation_colors = ann_colors,
+  cluster_cols     = FALSE,
+  cluster_rows     = TRUE,
+  show_rownames    = TRUE,
+  show_colnames    = TRUE,
+
+  cellheight = 10,   # increase vertical spacing
+  cellwidth  = 15,   # increase horizontal spacing
+  fontsize_row = 8,
+  fontsize_col = 8
+)
+
+dev.off()
+
+
+
+```
+
+```{r}
+#Day 1, Day 3
+library(DESeq2)
+
+# 1. Subset to Day 1 and Day 3 samples
+dds_d13 <- dds_lrt[, dds_lrt$Day %in% c("1", "3")]
+
+# drop unused day levels (5,7)
+dds_d13$Day <- droplevels(dds_d13$Day)
+
+# 2. Re-run LRT on this subset
+design(dds_d13) <- ~ Status + Day + Status:Day
+
+dds_d13 <- DESeq(
+  dds_d13,
+  test    = "LRT",
+  reduced = ~ Status + Day
+)
+
+resLRT_d13 <- results(dds_d13)
+summary(resLRT_d13)
+
+```
+```{r}
+# order by raw p-value
+res_ord_d13 <- resLRT_d13[order(resLRT_d13$pvalue), ]
+res_ord_d13 <- res_ord_d13[!is.na(res_ord_d13$pvalue), ]
+
+# take top 50 (or change to 30/100 as you like)
+top50_genes_d13 <- rownames(res_ord_d13)[1:50]
+
+```
+
+```{r}
+library(pheatmap)
+library(dplyr)
+
+# 1. VST on the Day1/3 subset
+vsd_d13 <- vst(dds_d13, blind = FALSE)
+
+# expression matrix for top genes
+mat_d13 <- assay(vsd_d13)[top50_genes_d13, ]
+
+# Z-score per gene
+mat_d13 <- t(scale(t(mat_d13)))
+
+# 2. Get colData and ordering by Subject then Day
+cd_d13 <- as.data.frame(colData(vsd_d13))
+cd_d13$Day_num <- as.numeric(as.character(cd_d13$Day))
+
+ord_d13 <- with(cd_d13, order(Subject, Day_num))
+
+mat_d13 <- mat_d13[, ord_d13]
+
+ann_d13 <- cd_d13[ord_d13, c("Day", "Status")]
+rownames(ann_d13) <- colnames(mat_d13)
+
+```
+
+```{r}
+rownames(mat_d13) <- gene_labels
+library(pheatmap)
+
+pdf("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/LRT_heatmap_Day1_Day3_top50.pdf", width = 14, height = 7)
+
+pheatmap(
+  mat_d13,
+  annotation_col    = ann_d13,
+  annotation_colors = ann_colors,
+  cluster_cols      = FALSE,   # keep Subject/Day order
+  cluster_rows      = TRUE,    # or FALSE if you prefer
+  show_rownames     = TRUE,
+  show_colnames     = TRUE,
+  cellwidth         = 8,       # smaller than before so everything fits
+  cellheight        = 8,
+  fontsize_col      = 7,
+  fontsize_row      = 7
+)
+
+dev.off()
+
+
+```
+
+```{r}
+#Day 1,3,5
+library(DESeq2)
+library(pheatmap)
+library(dplyr)
+
+## --- subset to Day 1, 3, 5 ---
+dds_d135 <- dds_lrt[, dds_lrt$Day %in% c("1","3","5")]
+dds_d135$Day <- droplevels(dds_d135$Day)
+
+design(dds_d135) <- ~ Status + Day + Status:Day
+
+dds_d135 <- DESeq(
+  dds_d135,
+  test    = "LRT",
+  reduced = ~ Status + Day
+)
+
+resLRT_d135 <- results(dds_d135)
+summary(resLRT_d135)
+
+res_ord_d135 <- resLRT_d135[order(resLRT_d135$pvalue), ]
+res_ord_d135 <- res_ord_d135[!is.na(res_ord_d135$pvalue), ]
+
+top50_genes_d135 <- rownames(res_ord_d135)[1:50]  # adjust 50 ↔ 30/100 as you like
+
+# VST
+vsd_d135 <- vst(dds_d135, blind = FALSE)
+
+mat_d135 <- assay(vsd_d135)[top50_genes_d135, ]
+mat_d135 <- t(scale(t(mat_d135)))   # z-score per gene
+
+# order by Subject then Day
+cd_d135 <- as.data.frame(colData(vsd_d135))
+cd_d135$Day_num <- as.numeric(as.character(cd_d135$Day))
+ord_d135 <- with(cd_d135, order(Subject, Day_num))
+
+mat_d135 <- mat_d135[, ord_d135]
+
+ann_d135 <- cd_d135[ord_d135, c("Day", "Status")]
+rownames(ann_d135) <- colnames(mat_d135)
+
+
+
+
+```
+```{r}
+rownames(mat_d135) <- gene_labels
+library(pheatmap)
+
+pdf("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/LRT_heatmap_Day1_Day3_Day5_top50.pdf", width = 14, height = 7)
+
+pheatmap(
+  mat_d135,
+  annotation_col    = ann_d135,
+  annotation_colors = ann_colors,
+  cluster_cols      = FALSE,   # keep Subject/Day order
+  cluster_rows      = TRUE,    # or FALSE if you prefer
+  show_rownames     = TRUE,
+  show_colnames     = TRUE,
+  cellwidth         = 8,       # smaller than before so everything fits
+  cellheight        = 8,
+  fontsize_col      = 7,
+  fontsize_row      = 7
+)
+
+dev.off()
+```
+```{r}
+#Overlap of genes across these timepoints?
+
+trend_all   <- rownames(resLRT)[which(resLRT$pvalue    < 0.05 & !is.na(resLRT$pvalue))]
+trend_d13   <- rownames(resLRT_d13)[which(resLRT_d13$pvalue  < 0.05 & !is.na(resLRT_d13$pvalue))]
+trend_d135  <- rownames(resLRT_d135)[which(resLRT_d135$pvalue < 0.05 & !is.na(resLRT_d135$pvalue))]
+
+length(trend_all); length(trend_d13); length(trend_d135)
+
+
+
+
+
+
+
+```
+
+```{r}
+# pairwise overlaps
+ov_all_d13   <- intersect(trend_all, trend_d13)
+ov_all_d135  <- intersect(trend_all, trend_d135)
+ov_d13_d135  <- intersect(trend_d13, trend_d135)
+
+# overlap of all three
+ov_all_3 <- Reduce(intersect, list(trend_all, trend_d13, trend_d135))
+
+length(ov_all_d13); length(ov_all_d135); length(ov_d13_d135); length(ov_all_3)
+
+```
+
+
+
+```{r}
+###############################################
+## STEP 1–4: FULL HGNC + VENN EXTRACTION PIPELINE
+###############################################
+
+library(biomaRt)
+library(dplyr)
+
+## -------------------------
+## INPUT: your Ensembl lists
+## -------------------------
+# (Replace these with your objects if names differ)
+# trend_all   ← Days 1-3-5-7
+# trend_d13   ← Day 1-3
+# trend_d135  ← Day 1-3-5
+
+clean_ids <- function(x) sub("\\..*", "", x)
+
+ens_all  <- clean_ids(trend_all)
+ens_d13  <- clean_ids(trend_d13)
+ens_d135 <- clean_ids(trend_d135)
+
+# union for mapping
+ens_union <- unique(c(ens_all, ens_d13, ens_d135))
+
+## -------------------------
+## STEP 1 — Build Ensembl → HGNC mapping
+## -------------------------
+
+mart <- useEnsembl("genes", dataset = "hsapiens_gene_ensembl")
+
+mapping <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters    = "ensembl_gene_id",
+  values     = ens_union,
+  mart       = mart
+)
+
+# named vector for lookup
+ens2sym <- setNames(mapping$hgnc_symbol, mapping$ensembl_gene_id)
+
+# helper to convert Ensembl → HGNC and deduplicate
+to_hgnc <- function(ens_vec) {
+  ens_clean <- clean_ids(ens_vec)
+  sym <- ens2sym[ens_clean]
+  sym <- sym[!is.na(sym) & sym != ""]
+  unique(sym)
+}
+
+## -------------------------
+## STEP 2 — Convert all 3 lists to HGNC
+## -------------------------
+
+sym_all   <- to_hgnc(trend_all)   # Days 1-3-5-7
+sym_d13   <- to_hgnc(trend_d13)   # Day 1-3
+sym_d135  <- to_hgnc(trend_d135)  # Day 1-3-5
+
+A <- sym_all
+B <- sym_d13
+C <- sym_d135
+
+## -------------------------
+## STEP 3 — Compute all 7 Venn regions in HGNC
+## -------------------------
+
+# 3-way overlap
+ABC <- Reduce(intersect, list(A, B, C))
+
+# pairwise-only
+AB_only <- setdiff(intersect(A, B), C)
+AC_only <- setdiff(intersect(A, C), B)
+BC_only <- setdiff(intersect(B, C), A)
+
+# unique sets
+A_only <- setdiff(A, union(B, C))
+B_only <- setdiff(B, union(A, C))
+C_only <- setdiff(C, union(A, B))
+
+## sanity check
+print(sapply(
+  list(A_only, B_only, C_only, AB_only, AC_only, BC_only, ABC),
+  length
+))
+
+## -------------------------
+## STEP 4 — Put all regions side-by-side + save CSV
+## -------------------------
+
+venn_lists_sym <- list(
+  Days_1_3_5_7_only              = A_only,
+  Day_1_3_only                   = B_only,
+  Day_1_3_5_only                 = C_only,
+  Overlap_Days_1_3_5_7_and_Day_1_3   = AB_only,
+  Overlap_Days_1_3_5_7_and_Day_1_3_5 = AC_only,
+  Overlap_Day_1_3_and_Day_1_3_5      = BC_only,
+  Overlap_all_three              = ABC
+)
+
+max_len <- max(sapply(venn_lists_sym, length))
+
+venn_df_sym <- as.data.frame(
+  lapply(venn_lists_sym, function(x) {
+    c(x, rep(NA, max_len - length(x)))
+  }),
+  stringsAsFactors = FALSE
+)
+
+write.csv(
+  venn_df_sym,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/LRT_trajectory_Venn_regions_HGNC.csv",
+  row.names = FALSE
+)
+
+################################################
+## END OF FULL PIPELINE
+################################################
+
+```
+
+```{r}
+###############################################
+## HGNC-based Venn Diagram (same style as before)
+###############################################
+
+library(VennDiagram)
+library(grid)
+
+# 1. Build the HGNC list for plotting
+venn_list_hgnc <- list(
+  `Days 1,3,5,7` = sym_all,     # HGNC set for A
+  `Day 1,3`      = sym_d13,     # HGNC set for B
+  `Day 1,3,5`    = sym_d135     # HGNC set for C
+)
+
+# 2. On-screen version
+grid.newpage()
+venn.plot <- venn.diagram(
+  x = venn_list_hgnc,
+  filename = NULL,
+  fill = c("#1b9e77", "#d95f02", "#7570b3"),
+  alpha = 0.5,
+  cex = 1.4,            # number size inside circles
+  cat.cex = 1.3,        # label size
+  cat.col = "black",
+  lwd = 2
+)
+grid.draw(venn.plot)
+
+# 3. Save as PDF (publication quality)
+pdf("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/LRT_trend_genes_venn_HGNC.pdf",
+    width = 7, height = 7)
+
+venn.plot <- venn.diagram(
+  x = venn_list_hgnc,
+  filename = NULL,
+  fill = c("#1b9e77", "#d95f02", "#7570b3"),
+  alpha = 0.5,
+  cex = 1.6,
+  cat.cex = 1.5,
+  cat.col = "black",
+  lwd = 2
+)
+grid.draw(venn.plot)
+
+dev.off()
+###############################################
+
+```
+
+
+```{r}
+#Feb.18.26
+library(readr)
+library(dplyr)
+
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+coldata_path <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/KC_SAB_RNAseq_coldata_updated.csv"
+
+
+out_counts_clean  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/counts_clean.tsv"
+out_coldata_clean <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean.tsv"
+
+# -------- helper: standardize sample IDs --------
+clean_sample_id <- function(x) {
+  x <- as.character(x)
+  x <- basename(x)
+  x <- gsub("\r", "", x)          # remove hidden carriage returns
+  x <- trimws(x)                 # remove leading/trailing spaces
+  x <- sub("\\.bam$", "", x)     # drop .bam
+  x
+}
+
+# =========================
+# 1) COUNTS: load + extract sample names
+# =========================
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+
+stopifnot("ID" %in% colnames(counts_raw))          # your file uses ID
+counts_raw <- counts_raw[!grepl("^__", counts_raw$ID), ]
+
+# counts columns start after first 6 annotation columns
+cts <- counts_raw[, -(1:6)]
+gene_ids <- counts_raw$ID
+
+colnames(cts) <- clean_sample_id(colnames(cts))
+
+# checks
+stopifnot(sum(colnames(cts) == "") == 0)
+if (anyDuplicated(colnames(cts)) > 0) {
+  dup <- unique(colnames(cts)[duplicated(colnames(cts))])
+  stop(paste("Duplicate sample IDs in COUNTS after cleaning:", paste(dup, collapse = ", ")))
+}
+
+# =========================
+# 2) COLDATA: load + clean sample column
+# =========================
+coldata <- read.csv(coldata_path, check.names = FALSE, stringsAsFactors = FALSE)
+names(coldata) <- trimws(names(coldata))
+
+if ("Sample Name" %in% names(coldata)) names(coldata)[names(coldata)=="Sample Name"] <- "Sample"
+stopifnot("Sample" %in% names(coldata))
+
+coldata$Sample <- clean_sample_id(coldata$Sample)
+
+# checks
+stopifnot(sum(coldata$Sample == "") == 0)
+if (anyDuplicated(coldata$Sample) > 0) {
+  dup <- unique(coldata$Sample[duplicated(coldata$Sample)])
+  print(coldata %>% filter(Sample %in% dup))
+  stop(paste("Duplicate sample IDs in COLDATA after cleaning:", paste(dup, collapse = ", ")))
+}
+
+# =========================
+# 3) ALIGN: keep only common samples, reorder
+# =========================
+common <- intersect(colnames(cts), coldata$Sample)
+cat("Samples in counts:", ncol(cts), "\n")
+cat("Samples in coldata:", nrow(coldata), "\n")
+cat("Common samples:", length(common), "\n")
+
+# keep & reorder counts
+cts <- cts[, common, drop = FALSE]
+
+# keep & reorder coldata to match counts
+coldata2 <- coldata %>% filter(Sample %in% common) %>% arrange(match(Sample, common))
+stopifnot(identical(colnames(cts), coldata2$Sample))
+
+# =========================
+# 4) SAVE cleaned outputs
+# =========================
+cts_out <- as.data.frame(cts)
+cts_out <- cbind(ID = gene_ids, cts_out)
+
+write.table(cts_out, out_counts_clean, sep="\t", quote=FALSE, row.names=FALSE)
+write.table(coldata2, out_coldata_clean, sep="\t", quote=FALSE, row.names=FALSE)
+
+cat("Saved:\n", out_counts_clean, "\n", out_coldata_clean, "\n")
+
+
+```
+
+```{r}
+#Feb.18.26
+cts_df <- read.delim("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/counts_clean.tsv",
+                     check.names = FALSE)
+
+# Clean IDs
+cts_df$ID <- trimws(gsub("\r", "", cts_df$ID))
+
+# Drop rows with blank/NA gene IDs
+cts_df <- cts_df[!is.na(cts_df$ID) & cts_df$ID != "", ]
+
+# (Optional) if any duplicates remain, make them unique
+cts_df$ID <- make.unique(cts_df$ID)
+
+# Now safely set rownames and extract matrix
+rownames(cts_df) <- cts_df$ID
+cts <- as.matrix(cts_df[, -1])
+mode(cts) <- "numeric"
+
+sum(rownames(cts_df) == "")
+anyDuplicated(rownames(cts_df))
+dim(cts)
+
+```
+```{r}
+# Drop genes with any NA counts
+cts <- cts[rowSums(is.na(cts)) == 0, ]
+
+# Sanity check
+sum(is.na(cts))        # should be 0
+dim(cts)
+
+```
+```{r}
+# 0) Reload fresh
+coldata <- read.delim("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean.tsv",
+                      check.names = FALSE, stringsAsFactors = FALSE)
+
+# 1) Set rownames correctly (THIS is what caused your subscript error)
+coldata$Sample <- trimws(gsub("\r", "", coldata$Sample))
+rownames(coldata) <- coldata$Sample
+
+# 2) Clean Day robustly + factor it
+coldata$Day_raw <- coldata$Day
+coldata$Day <- trimws(as.character(coldata$Day_raw))
+coldata$Day <- gsub("[^0-9]", "", coldata$Day)
+coldata$Day <- factor(coldata$Day, levels = c("1","3","5","7"))
+
+# 3) Check NA Day (should be 0)
+cat("NA Day:", sum(is.na(coldata$Day)), "\n")
+if (sum(is.na(coldata$Day)) > 0) {
+  print(coldata[is.na(coldata$Day), c("Sample","Status","Day_raw","Subject")])
+}
+
+# 4) Drop bad Day rows (safe even if none)
+coldata$Status <- factor(coldata$Status)
+coldata <- coldata[!is.na(coldata$Day) & !is.na(coldata$Status), , drop = FALSE]
+
+# 5) Now subset counts using Sample IDs
+cat("All samples in counts?:", all(rownames(coldata) %in% colnames(cts)), "\n")
+cts <- cts[, rownames(coldata), drop = FALSE]
+stopifnot(identical(colnames(cts), rownames(coldata)))
+
+# After setting rownames(coldata) <- coldata$Sample
+coldata$Day <- factor(as.character(coldata$Day_raw), levels = c("1","3","5","7"))
+
+# Drop samples not in days 1/3/5/7
+keep_samples <- !is.na(coldata$Day)
+coldata <- coldata[keep_samples, , drop = FALSE]
+
+# Subset counts to the remaining samples (now rownames are sample IDs)
+cts <- cts[, rownames(coldata), drop = FALSE]
+stopifnot(identical(colnames(cts), rownames(coldata)))
+
+# Check
+table(coldata$Status, coldata$Day)
+
+
+
+```
+
+
+```{r}
+#Feb.18.26
+library(DESeq2)
+
+
+# Ensure factors are set correctly
+coldata$Status <- factor(coldata$Status)
+coldata$Day    <- factor(coldata$Day, levels = c("1","3","5","7"))  # adjust if numeric
+
+dds <- DESeqDataSetFromMatrix(
+  countData = cts,
+  colData   = coldata,
+  design    = ~ Status + Day + Status:Day
+)
+
+# basic gene filter
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds  <- dds[keep, ]
+
+
+# dds_all should have design ~ Status + Day + Status:Day
+# and include all days 1,3,5,7
+dds_all <- dds
+design(dds_all) <- ~ Status + Day + Status:Day
+
+dds_lrt <- DESeq(dds_all,
+                 test    = "LRT",
+                 reduced = ~ Status + Day)
+
+resLRT <- results(dds_lrt)
+summary(resLRT)
+
+# -------------------------
+# 1) Significant LRT genes
+# -------------------------
+# -------------------------
+# 1) Significant LRT genes (raw p < 0.05)
+# -------------------------
+sig_LRT <- resLRT[!is.na(resLRT$pvalue) & resLRT$pvalue < 0.05, ]
+
+sig_genes <- rownames(sig_LRT)
+cat("Significant trajectory genes (p < 0.05):", length(sig_genes), "\n")
+
+stopifnot(length(sig_genes) > 1)
+
+# -------------------------
+# 2) VST transform
+# -------------------------
+vsd <- vst(dds_lrt, blind = FALSE)
+norm_mat <- assay(vsd)[sig_genes, , drop = FALSE]
+
+# -------------------------
+# 3) DEGreport clustering
+# -------------------------
+library(DEGreport)
+
+cluster_mat <- norm_mat
+meta <- as.data.frame(colData(dds_lrt))
+
+meta$Day <- factor(as.character(meta$Day), levels = c("1","3","5","7"))
+meta$Status <- factor(meta$Status)
+
+clusters <- degPatterns(
+  cluster_mat,
+  metadata = meta,
+  time     = "Day",
+  col      = "Status"
+)
+
+# gene-to-cluster mapping
+head(clusters$df)
+
+# trajectory plot
+clusters$plot
+
+```
+```{r}
+# 3.10.26
+#running full analysis on all days Days 1-9
+
+library(DESeq2)
+library(DEGreport)
+
+# -------------------------
+# 0) Load metadata fresh
+# -------------------------
+coldata <- read.delim(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean.tsv",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+coldata$Sample <- trimws(gsub("\r", "", coldata$Sample))
+rownames(coldata) <- coldata$Sample
+
+# -------------------------
+# 1) Load counts fresh
+# -------------------------
+counts_df <- read.delim(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/counts_clean.tsv",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+colnames(counts_df)[1] <- "ID"
+counts_df$ID <- trimws(as.character(counts_df$ID))
+counts_df <- counts_df[!is.na(counts_df$ID) & counts_df$ID != "", , drop = FALSE]
+rownames(counts_df) <- counts_df$ID
+counts_df$ID <- NULL
+colnames(counts_df) <- trimws(gsub("\r", "", colnames(counts_df)))
+counts_df[] <- lapply(counts_df, function(x) as.numeric(trimws(as.character(x))))
+counts_df <- counts_df[complete.cases(counts_df), , drop = FALSE]
+
+counts_mat <- as.matrix(counts_df)
+storage.mode(counts_mat) <- "numeric"
+
+# -------------------------
+# 2) Create NEW any-day metadata
+# -------------------------
+coldata_anyday <- coldata
+coldata_anyday$Day_raw <- coldata_anyday$Day
+coldata_anyday$Day_clean <- trimws(as.character(coldata_anyday$Day_raw))
+coldata_anyday$Day_clean <- gsub("[^0-9]", "", coldata_anyday$Day_clean)
+coldata_anyday$Day_clean[coldata_anyday$Day_clean == ""] <- NA
+
+coldata_anyday$Day <- factor(coldata_anyday$Day_clean)
+coldata_anyday$Status <- factor(coldata_anyday$Status)
+coldata_anyday <- coldata_anyday[!is.na(coldata_anyday$Day) & !is.na(coldata_anyday$Status), , drop = FALSE]
+
+# -------------------------
+# 3) Match metadata and counts
+# -------------------------
+common_samples_anyday <- rownames(coldata_anyday)[rownames(coldata_anyday) %in% colnames(counts_mat)]
+coldata_anyday_matched <- coldata_anyday[common_samples_anyday, , drop = FALSE]
+counts_anyday_matched  <- counts_mat[, common_samples_anyday, drop = FALSE]
+
+# -------------------------
+# 4) Keep only days with BOTH statuses represented
+# -------------------------
+tab <- table(coldata_anyday_matched$Status, coldata_anyday_matched$Day)
+valid_days <- colnames(tab)[colSums(tab == 0) == 0]
+
+coldata_anyday_balanced <- coldata_anyday_matched[coldata_anyday_matched$Day %in% valid_days, , drop = FALSE]
+coldata_anyday_balanced$Day <- droplevels(coldata_anyday_balanced$Day)
+coldata_anyday_balanced$Status <- droplevels(coldata_anyday_balanced$Status)
+
+counts_anyday_balanced <- counts_anyday_matched[, rownames(coldata_anyday_balanced), drop = FALSE]
+
+stopifnot(identical(rownames(coldata_anyday_balanced), colnames(counts_anyday_balanced)))
+stopifnot(sum(is.na(counts_anyday_balanced)) == 0)
+
+cat("Days kept for interaction model:\n")
+print(valid_days)
+
+cat("Final balanced sample table:\n")
+print(table(coldata_anyday_balanced$Status, coldata_anyday_balanced$Day))
+
+# -------------------------
+# 5) DESeq2 any-day LRT
+# -------------------------
+dds_anyday <- DESeqDataSetFromMatrix(
+  countData = counts_anyday_balanced,
+  colData   = coldata_anyday_balanced,
+  design    = ~ Status + Day + Status:Day
+)
+
+keep_anyday <- rowSums(counts(dds_anyday) >= 10) >= 3
+dds_anyday <- dds_anyday[keep_anyday, ]
+
+dds_lrt_anyday <- DESeq(
+  dds_anyday,
+  test    = "LRT",
+  reduced = ~ Status + Day
+)
+
+resLRT_anyday <- results(dds_lrt_anyday)
+summary(resLRT_anyday)
+
+# -------------------------
+# 6) Significant genes
+# -------------------------
+sig_LRT_anyday <- resLRT_anyday[!is.na(resLRT_anyday$pvalue) & resLRT_anyday$pvalue < 0.05, ]
+sig_genes_anyday <- rownames(sig_LRT_anyday)
+
+cat("Significant trajectory genes (raw p < 0.05):", length(sig_genes_anyday), "\n")
+
+# -------------------------
+# 7) VST + clustering
+# -------------------------
+vsd_anyday <- vst(dds_lrt_anyday, blind = FALSE)
+norm_mat_anyday <- assay(vsd_anyday)[sig_genes_anyday, , drop = FALSE]
+
+meta_anyday <- as.data.frame(colData(dds_lrt_anyday))
+meta_anyday$Day <- droplevels(meta_anyday$Day)
+meta_anyday$Status <- droplevels(meta_anyday$Status)
+
+clusters_anyday <- degPatterns(
+  norm_mat_anyday,
+  metadata = meta_anyday,
+  time     = "Day",
+  col      = "Status"
+)
+
+head(clusters_anyday$df)
+clusters_anyday$plot
+
+# gene-to-cluster table
+gene_cluster_table <- clusters_anyday$df[, c("genes", "cluster")]
+colnames(gene_cluster_table) <- c("Gene", "Cluster")
+
+# sort nicely
+gene_cluster_table <- gene_cluster_table[order(gene_cluster_table$Cluster, gene_cluster_table$Gene), ]
+
+# also keep a CSV version if wanted
+write.csv(
+  gene_cluster_table,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DeSeq2_LRT_genes_by_cluster_Days1-9.csv",
+  row.names = FALSE
+)
+
+head(gene_cluster_table)
+
+
+```
+
+```{r}
+#3.31.26
+
+library(DESeq2)
+library(DEGreport)
+
+# -------------------------
+# 0) Load metadata fresh
+# -------------------------
+coldata_full <- read.csv(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean_3.30.26.csv", 
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+coldata_full$Sample <- trimws(gsub("\r", "", coldata_full$Sample))
+rownames(coldata_full) <- coldata_full$Sample
+
+dim(coldata_full)
+head(coldata_full)
+
+
+
+# -------------------------
+# 1) Load cleaned counts fresh
+# -------------------------
+counts_df_full <- read.csv(
+  "/Users/chhugani/Desktop/featureCounts_HGNC_3.27.26.csv",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+colnames(counts_df_full)[1] <- "Gene"
+counts_df_full$Gene <- trimws(as.character(counts_df_full$Gene))
+counts_df_full <- counts_df_full[!is.na(counts_df_full$Gene) & counts_df_full$Gene != "", , drop = FALSE]
+
+rownames(counts_df_full) <- counts_df_full$Gene
+counts_df_full$Gene <- NULL
+
+colnames(counts_df_full) <- trimws(gsub("\r", "", colnames(counts_df_full)))
+counts_df_full[] <- lapply(counts_df_full, function(x) as.numeric(trimws(as.character(x))))
+counts_df_full <- counts_df_full[complete.cases(counts_df_full), , drop = FALSE]
+
+counts_mat_full <- as.matrix(counts_df_full)
+storage.mode(counts_mat_full) <- "numeric"
+
+# -------------------------
+# 2) Create NEW full-cohort metadata
+# -------------------------
+coldata_lrt_full <- coldata_full
+coldata_lrt_full$Day_raw <- coldata_lrt_full$Day
+coldata_lrt_full$Day_clean <- trimws(as.character(coldata_lrt_full$Day_raw))
+coldata_lrt_full$Day_clean <- gsub("[^0-9]", "", coldata_lrt_full$Day_clean)
+coldata_lrt_full$Day_clean[coldata_lrt_full$Day_clean == ""] <- NA
+
+coldata_lrt_full$Day <- factor(coldata_lrt_full$Day_clean)
+coldata_lrt_full$Status <- factor(coldata_lrt_full$Status)
+coldata_lrt_full <- coldata_lrt_full[!is.na(coldata_lrt_full$Day) & !is.na(coldata_lrt_full$Status), , drop = FALSE]
+
+dim(coldata_lrt_full)
+table(coldata_lrt_full$Status, coldata_lrt_full$Day)
+
+# -------------------------
+# 4) Keep only days with BOTH statuses represented
+# -------------------------
+# Match metadata and counts
+common_samples_full <- intersect(rownames(coldata_lrt_full), colnames(counts_mat_full))
+
+length(common_samples_full)
+head(common_samples_full)
+
+coldata_lrt_full_final <- coldata_lrt_full[common_samples_full, , drop = FALSE]
+counts_lrt_full_final  <- counts_mat_full[, common_samples_full, drop = FALSE]
+
+dim(coldata_lrt_full_final)
+dim(counts_lrt_full_final)
+
+identical(rownames(coldata_lrt_full_final), colnames(counts_lrt_full_final))
+sum(counts_lrt_full_final)
+counts_lrt_full_final[1:5, 1:5]
+
+# -------------------------
+# Restrict to Days 1, 3, 5, 7
+# -------------------------
+keep_days <- c("1", "3", "5", "7")
+
+coldata_lrt_1to7 <- coldata_lrt_full_final[
+  as.character(coldata_lrt_full_final$Day) %in% keep_days,
+  ,
+  drop = FALSE
+]
+
+coldata_lrt_1to7$Day <- factor(as.character(coldata_lrt_1to7$Day), levels = keep_days)
+coldata_lrt_1to7$Status <- droplevels(coldata_lrt_1to7$Status)
+
+counts_lrt_1to7 <- counts_lrt_full_final[, rownames(coldata_lrt_1to7), drop = FALSE]
+
+# check design balance
+table(coldata_lrt_1to7$Status, coldata_lrt_1to7$Day)
+
+# make sure ordering matches
+stopifnot(identical(rownames(coldata_lrt_1to7), colnames(counts_lrt_1to7)))
+
+#running deseq2 LRT
+dds_1to7 <- DESeqDataSetFromMatrix(
+  countData = counts_lrt_1to7,
+  colData   = coldata_lrt_1to7,
+  design    = ~ Status + Day + Status:Day
+)
+
+keep_genes_1to7 <- rowSums(counts(dds_1to7) >= 10) >= 3
+dds_1to7 <- dds_1to7[keep_genes_1to7, ]
+
+dds_lrt_1to7 <- DESeq(
+  dds_1to7,
+  test    = "LRT",
+  reduced = ~ Status + Day
+)
+
+resLRT_1to7 <- results(dds_lrt_1to7)
+summary(resLRT_1to7)
+
+# -------------------------
+# 6) Significant genes
+# -------------------------
+sig_LRT_1to7 <- resLRT_1to7[!is.na(resLRT_1to7$pvalue) & resLRT_1to7$pvalue < 0.05, ]
+sig_genes_1to7 <- rownames(sig_LRT_1to7)
+
+cat("Significant trajectory genes (raw p < 0.05):", length(sig_genes_1to7), "\n")
+
+table(coldata_lrt_1to7$Status, coldata_lrt_1to7$Day)
+
+# -------------------------
+# 7) VST + clustering
+# -------------------------
+vsd_1to7 <- vst(dds_lrt_1to7, blind = FALSE)
+norm_mat_1to7 <- assay(vsd_1to7)[sig_genes_1to7, , drop = FALSE]
+
+meta_1to7 <- as.data.frame(colData(dds_lrt_1to7))
+meta_1to7$Day <- droplevels(meta_1to7$Day)
+meta_1to7$Status <- droplevels(meta_1to7$Status)
+
+clusters_1to7 <- degPatterns(
+  norm_mat_1to7,
+  metadata = meta_1to7,
+  time     = "Day",
+  col      = "Status"
+)
+
+head(clusters_1to7$df)
+clusters_1to7$plot
+
+library(ggplot2)
+ggsave(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/clusters_1to7.png",
+  plot = clusters_1to7$plot,
+  width = 10,
+  height = 8,
+  dpi = 600
+)
+
+# gene-to-cluster table
+gene_cluster_table_1to7 <- clusters_1to7$df[, c("genes", "cluster")]
+colnames(gene_cluster_table_1to7) <- c("Gene", "Cluster")
+
+gene_cluster_table_1to7 <- gene_cluster_table_1to7[
+  order(gene_cluster_table_1to7$Cluster, gene_cluster_table_1to7$Gene),
+]
+
+head(gene_cluster_table_1to7)
+
+write.csv(
+  gene_cluster_table_1to7,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DeSeq2_LRT_genes_by_cluster_Days1-7_fullcohort_3.31.26.csv",
+  row.names = FALSE
+)
+
+head(gene_cluster_table_1to7)
+
+
+```
+
+```{r}
+#3.31.26
+write.table(
+  tpm_symbol,
+  file = "/Users/chhugani/TPM_matrix_geneSymbols_3.31.26_CIBERSORTx.tsv",
+  sep = "\t",
+  quote = FALSE,
+  row.names = TRUE,
+  col.names = NA
+)
+```
+
+```{r}
+#3.10.26
+
+# get gene + cluster table
+gene_cluster_table <- clusters_anyday$df[, c("genes", "cluster")]
+colnames(gene_cluster_table) <- c("Gene", "Cluster")
+
+# remove Ensembl version numbers
+gene_cluster_table$Ensembl_clean <- sub("\\..*$", "", gene_cluster_table$Gene)
+
+library(biomaRt)
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "hsapiens_gene_ensembl"
+)
+
+gene_map <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = unique(gene_cluster_table$Ensembl_clean),
+  mart = mart
+)
+
+# create lookup vector
+ensg_to_symbol <- setNames(
+  gene_map$hgnc_symbol,
+  gene_map$ensembl_gene_id
+)
+
+# map HGNC symbols
+gene_cluster_table$HGNC <- ensg_to_symbol[gene_cluster_table$Ensembl_clean]
+
+# reorder columns
+gene_cluster_table <- gene_cluster_table[, c("Gene","Ensembl_clean","HGNC","Cluster")]
+
+# save CSV
+write.csv(
+  gene_cluster_table,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/DeSeq2_LRT_genes_by_cluster_HGNC_Days1-9.csv",
+  row.names = FALSE
+)
+
+head(gene_cluster_table)
+
+
+```
+
+```{r}
+#Feb.19.26
+genes_c9_clean <- sub("\\..*$", "", genes_c9)
+head(genes_c9_clean)
+
+library(biomaRt)
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "hsapiens_gene_ensembl"
+)
+
+gene_map <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = unique(genes_c9_clean),
+  mart = mart
+)
+
+# Create lookup vector
+ensg_to_symbol <- setNames(
+  gene_map$hgnc_symbol,
+  gene_map$ensembl_gene_id
+)
+
+```
+
+```{r}
+plot_gene_vst <- function(gene, vsd, meta, mapping) {
+
+  gene_clean <- sub("\\..*$", "", gene)
+  symbol <- mapping[gene_clean]
+
+  if (is.na(symbol) || symbol == "") {
+    symbol <- gene_clean
+  }
+
+  df <- data.frame(
+    Sample = rownames(meta),
+    Status = meta$Status,
+    Day    = factor(as.character(meta$Day), levels = c("1","3","5","7")),
+    expr   = as.numeric(assay(vsd)[gene, rownames(meta)])
+  )
+
+  ggplot(df, aes(x = Day, y = expr, group = Status, color = Status)) +
+    geom_point(position = position_jitter(width = 0.1), size = 2, alpha = 0.6) +
+    stat_summary(fun = mean, geom = "line", linewidth = 1) +
+    stat_summary(fun = mean, geom = "point", size = 3) +
+    labs(title = paste0(symbol, " (", gene_clean, ")"),
+         y = "VST expression") +
+    theme_classic()
+}
+
+pdf("/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Cluster9_individual_gene_plots_VST_HGNC.pdf", width = 7, height = 5)
+
+for (g in genes_c9) {
+  print(plot_gene_vst(g, vsd, meta, ensg_to_symbol))
+}
+
+dev.off()
+
+
+```
+
+```{r}
+library(biomaRt)
+all_genes_clean <- sub("\\..*$", "", rownames(vsd))
+
+gene_map_all <- getBM(
+  attributes = c("ensembl_gene_id", "hgnc_symbol"),
+  filters = "ensembl_gene_id",
+  values = unique(all_genes_clean),
+  mart = mart
+)
+
+ensg_to_symbol <- setNames(
+  gene_map_all$hgnc_symbol,
+  gene_map_all$ensembl_gene_id
+)
+
+saveRDS(ensg_to_symbol, "ensg_to_symbol_mapping.rds")
+
+```
+
+```{r}
+cluster_groups <- clusters$df
+
+group9 <- cluster_groups %>%
+  dplyr::filter(cluster == 9) %>%
+  dplyr::pull(genes) %>%
+  unique()
+length(group9)
+
+group9_clean <- sub("\\..*$", "", group9)
+group9_hgnc  <- unname(ensg_to_symbol[group9_clean])
+group9_hgnc  <- group9_hgnc[!is.na(group9_hgnc) & group9_hgnc != ""]
+length(group9_hgnc)
+head(group9_hgnc)
+
+install.packages(c("ggiraph", "systemfonts", "gdtools"))
+BiocManager::install(c("clusterProfiler", "enrichplot"))
+
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+# HGNC -> Entrez
+entrez <- mapIds(org.Hs.eg.db, keys = group9_hgnc,
+                 keytype = "SYMBOL", column = "ENTREZID",
+                 multiVals = "first")
+entrez <- na.omit(unique(entrez))
+
+ego <- enrichGO(
+  gene          = entrez,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pvalueCutoff  = 0.05,     # raw p-value cutoff
+  pAdjustMethod = "none",   # don't adjust
+  qvalueCutoff  = 1         # effectively ignore q-value filtering
+)
+
+# then view results
+head(as.data.frame(ego))
+
+
+
+
+```
+
+```{r}
+#February 20th 2026
+# ===============================
+# ONE BLOCK: MEFISTO gene list -> LRT clusters + HGNC trajectory plots
+# ===============================
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# 1) Strip ENSG version numbers
+ensg_stripped <- sub("\\..*$", "", clusters$df$genes)
+
+# 2) Map ENSG → SYMBOL
+ensg2sym <- mapIds(
+  org.Hs.eg.db,
+  keys = ensg_stripped,
+  column = "SYMBOL",
+  keytype = "ENSEMBL",
+  multiVals = "first"
+)
+
+# 3) Add SYMBOL column to clusters$df
+clusters$df$SYMBOL <- ensg2sym
+
+# 4) Now map your MEFISTO Factor1+ genes
+f1_pos_symbols <- c(
+  "ANKRD22","ZDHHC19","GPR84","CD177","MCEMP1","TNFAIP6","IL1R2",
+  "FCGR1A","KCNMA1","BATF2","S100A12","S100A8","ANXA3","CASP5",
+  "CEACAM1","TMT1B","OLAH","HP","CD274"
+)
+
+hit <- clusters$df[clusters$df$SYMBOL %in% f1_pos_symbols, ]
+
+cat("MEFISTO genes in LRT clusters:", nrow(hit), "out of", length(f1_pos_symbols), "\n\n")
+
+hit <- hit[order(hit$cluster, hit$SYMBOL), ]
+print(hit[, c("genes","SYMBOL","cluster")])
+
+cat("\nCounts per cluster:\n")
+print(sort(table(hit$cluster), decreasing = TRUE))
+
+
+#f1 negative 
+f1_neg_symbols <- c(
+  "PRSS33","ALOX15","TCF7","CD8B","TRAC","LINC00402","EEIG1",
+  "CD8A","CD6","LINC00861","GZMK","SIGLEC8","CD3E","LOC105377225",
+  "CXCR3","TRBC1","CD40LG","TRBC2","CD5", "TRBV5-1"
+)
+
+hit <- clusters$df[clusters$df$SYMBOL %in% f1_neg_symbols, ]
+
+cat("MEFISTO genes in LRT clusters:", nrow(hit), "out of", length(f1_neg_symbols), "\n\n")
+
+hit <- hit[order(hit$cluster, hit$SYMBOL), ]
+print(hit[, c("genes","SYMBOL","cluster")])
+
+cat("\nCounts per cluster:\n")
+print(sort(table(hit$cluster), decreasing = TRUE))
+
+#f3 positive
+f3_pos_symbols <- c(
+  "RSAD2","OAS3","IFI44L","IFIT1","IFI44","IFI6","EPSTI1",
+  "SIGLEC1","OAS2","HERC5","GBP5","GBP1","OAS1","P2RY14",
+  "MX1","BATF2","CMPK2"
+)
+
+hit <- clusters$df[clusters$df$SYMBOL %in% f3_pos_symbols, ]
+
+cat("MEFISTO genes in LRT clusters:", nrow(hit), "out of", length(f3_pos_symbols), "\n\n")
+
+hit <- hit[order(hit$cluster, hit$SYMBOL), ]
+print(hit[, c("genes","SYMBOL","cluster")])
+
+cat("\nCounts per cluster:\n")
+print(sort(table(hit$cluster), decreasing = TRUE))
+
+
+#f3 negative 
+f3_neg_symbols <- c(
+  "ELANE","AZU1","CHIT1","LCN2","CTSG","BPI","DEFA4",
+  "PRTN3","CEACAM8","LTF","MS4A3","MPO","MMP8","CAMP",
+  "ORM1","TCN1","CEACAM6","COL17A1","CRISP3"
+)
+
+hit <- clusters$df[clusters$df$SYMBOL %in% f3_neg_symbols, ]
+
+cat("MEFISTO genes in LRT clusters:", nrow(hit), "out of", length(f3_neg_symbols), "\n\n")
+
+hit <- hit[order(hit$cluster, hit$SYMBOL), ]
+print(hit[, c("genes","SYMBOL","cluster")])
+
+cat("\nCounts per cluster:\n")
+print(sort(table(hit$cluster), decreasing = TRUE))
+
+
+
+```
+```{r}
+# ---- Minimal trajectory plot (ENSG labels ok) ----
+genes_to_plot <- c("ENSG00000152766.6","ENSG00000168062.10","ENSG00000170439.8")  # ANKRD22, BATF2, TMT1B
+
+# Use your full VST so the genes are guaranteed to exist
+vsd_full <- vst(dds_lrt, blind = FALSE)
+mat_full <- assay(vsd_full)
+
+# Match genes with/without version suffix
+gtp <- sub("\\..*$", "", genes_to_plot)
+mat_stripped <- sub("\\..*$", "", rownames(mat_full))
+idx <- match(gtp, mat_stripped)
+
+# Subset expression (genes x samples)
+expr_mat <- mat_full[idx[!is.na(idx)], , drop = FALSE]
+rownames(expr_mat) <- genes_to_plot[!is.na(idx)]  # keep ENSG labels
+
+# Long dataframe for plotting
+df_long <- data.frame(Sample = colnames(expr_mat), t(expr_mat), check.names = FALSE)
+df_long <- merge(df_long, transform(meta, Sample = rownames(meta)), by = "Sample")
+
+library(tidyr); library(ggplot2)
+
+df_long <- pivot_longer(df_long, cols = all_of(rownames(expr_mat)),
+                        names_to = "Gene", values_to = "Expr")
+
+df_long$Day <- factor(as.character(df_long$Day), levels = c("1","3","5","7"))
+df_long$Status <- factor(df_long$Status)
+
+ggplot(df_long, aes(x = Day, y = Expr, color = Status)) +
+  geom_point(alpha = 0.7, position = position_jitter(width = 0.08, height = 0)) +
+  stat_summary(aes(group = Status), fun = mean, geom = "line", linewidth = 1.1) +
+  stat_summary(aes(group = Status), fun = mean, geom = "point", size = 2.2) +
+  facet_wrap(~ Gene, scales = "free_y") +
+  theme_classic() +
+  labs(title = "Gene trajectories (VST) by Status", y = "VST expression")
+```
+
+```{r}
+#February 20 2026 clustering genes without statistical pre-filtering to see where genes end up because p < 0.05 might be too strict...
+
+############################################
+# NEW ANALYSIS: Cluster HVGs only (no p filter)
+############################################
+library(matrixStats)
+library(DEGreport)
+
+# 1) VST full (already did)
+vsd_all <- vst(dds_lrt, blind = FALSE)
+mat_all <- assay(vsd_all)
+
+# 2) Pick HVGs by variance across ALL samples
+vars_all <- rowVars(mat_all)
+topN <- 5000   # try 5000 first; 10000 if you want more coverage
+top_genes_all <- names(sort(vars_all, decreasing = TRUE))[1:topN]
+
+norm_mat_hvg <- mat_all[top_genes_all, , drop=FALSE]
+cat("Clustering HVGs:", nrow(norm_mat_hvg), "genes\n")
+
+# 3) Cluster HVGs
+clusters_hvg <- degPatterns(
+  norm_mat_hvg,
+  metadata = meta,
+  time = "Day",
+  col  = "Status"
+)
+
+clusters_hvg$plot
+
+p <- clusters_hvg$plot
+
+ggsave(
+  "/Users/chhugani/Desktop/HVG_clusters_large.png",
+  plot = p,
+  width = 18,
+  height = 14,
+  dpi = 300
+)
+
+
+```
+
+```{r}
+############################################
+# Map MEFISTO gene SYMBOL lists -> HVG clusters (clusters_hvg)
+############################################
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# --- your gene sets (as provided) ---
+f1_pos_symbols <- c("ANKRD22","ZDHHC19","GPR84","CD177","MCEMP1","TNFAIP6","IL1R2","FCGR1A","KCNMA1","BATF2","S100A12","S100A8","ANXA3","CASP5","CEACAM1","TMT1B","OLAH","HP","CD274")
+f1_neg_symbols <- c("PRSS33","ALOX15","TCF7","CD8B","TRAC","LINC00402","EEIG1","CD8A","CD6","LINC00861","GZMK","SIGLEC8","CD3E","LOC105377225","CXCR3","TRBC1","CD40LG","TRBC2","CD5","TRBV5-1")
+f3_pos_symbols <- c("RSAD2","OAS3","IFI44L","IFIT1","IFI44","IFI6","EPSTI1","SIGLEC1","OAS2","HERC5","GBP5","GBP1","OAS1","P2RY14","MX1","BATF2","CMPK2")
+f3_neg_symbols <- c("ELANE","AZU1","CHIT1","LCN2","CTSG","BPI","DEFA4","PRTN3","CEACAM8","LTF","MS4A3","MPO","MMP8","CAMP","ORM1","TCN1","CEACAM6","COL17A1","CRISP3")
+
+# --- helper: SYMBOL -> ENSG (unversioned) ---
+sym_to_ensg <- function(sym_vec) {
+  ensg <- mapIds(org.Hs.eg.db,
+                 keys = unique(sym_vec),
+                 column = "ENSEMBL",
+                 keytype = "SYMBOL",
+                 multiVals = "first")
+  ensg <- ensg[!is.na(ensg)]
+  data.frame(SYMBOL = names(ensg), ENSG = unname(ensg), stringsAsFactors = FALSE)
+}
+
+# --- cluster mapping table from degPatterns HVG run ---
+df_map <- clusters_hvg$df  # columns: genes, cluster
+df_map$ENSG <- sub("\\..*$", "", df_map$genes)  # strip version if present
+
+# --- function: map a SYMBOL set to clusters ---
+map_set_to_clusters <- function(sym_set, set_name) {
+  m <- sym_to_ensg(sym_set)
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by = "ENSG")
+  hit <- hit[order(hit$cluster, hit$SYMBOL), ]
+
+  cat("\n============================\n", set_name, "\n============================\n", sep="")
+  cat("Input symbols:", length(sym_set), "\n")
+  cat("Mapped to ENSG:", nrow(m), "\n")
+  cat("Found in HVG clusters:", nrow(hit), "\n\n")
+
+  if (nrow(hit) == 0) {
+    cat("None of these genes are in the top-5000 HVGs used for clustering.\n")
+    return(invisible(NULL))
+  }
+
+  print(hit[, c("SYMBOL","genes","cluster")], row.names = FALSE)
+  cat("\nCounts per cluster:\n")
+  print(sort(table(hit$cluster), decreasing = TRUE))
+
+  invisible(hit)
+}
+
+# --- run mapping for each set ---
+hit_f1_pos <- map_set_to_clusters(f1_pos_symbols, "Factor1 POS")
+hit_f1_neg <- map_set_to_clusters(f1_neg_symbols, "Factor1 NEG")
+hit_f3_pos <- map_set_to_clusters(f3_pos_symbols, "Factor3 POS")
+hit_f3_neg <- map_set_to_clusters(f3_neg_symbols, "Factor3 NEG")
+```
+```{r}
+genes_to_plot <- unique(hit_f1_pos$genes)
+expr_mat <- norm_mat_hvg[genes_to_plot, , drop=FALSE]
+
+df_long <- data.frame(Sample = colnames(expr_mat), t(expr_mat), check.names=FALSE)
+df_long <- merge(df_long, transform(meta, Sample=rownames(meta)), by="Sample")
+
+library(tidyr); library(ggplot2)
+df_long <- pivot_longer(df_long, cols = all_of(genes_to_plot),
+                        names_to="Gene", values_to="Expr")
+
+df_long$Day <- factor(as.character(df_long$Day), levels=c("1","3","5","7"))
+df_long$Status <- factor(df_long$Status)
+
+ggplot(df_long, aes(x=Day, y=Expr, color=Status)) +
+  geom_point(alpha=0.7, position=position_jitter(width=0.08, height=0)) +
+  stat_summary(aes(group=Status), fun=mean, geom="line", linewidth=1.1) +
+  facet_wrap(~ Gene, scales="free_y") +
+  theme_classic() +
+  labs(title="Factor1 POS genes (within top-5000 HVGs)", y="VST expression")
+```
+```{r}
+############################################
+# Attach DESeq2 LRT p-values to MEFISTO genes
+############################################
+
+# Prepare LRT results table
+lrt_df <- as.data.frame(resLRT)
+lrt_df$ENSG <- sub("\\..*$","", rownames(lrt_df))
+
+# Helper function
+add_pvals <- function(hit_table, set_name) {
+
+  if (is.null(hit_table) || nrow(hit_table) == 0) {
+    cat("\n", set_name, ": no genes to test\n")
+    return(NULL)
+  }
+
+  merged <- merge(hit_table, lrt_df,
+                  by = "ENSG", all.x = TRUE)
+
+  merged <- merged[order(merged$pvalue), ]
+
+  cat("\n============================\n", set_name, "\n============================\n", sep="")
+  print(merged[, c("SYMBOL","cluster","pvalue","padj")], row.names=FALSE)
+
+  invisible(merged)
+}
+
+lrt_f1_pos <- add_pvals(hit_f1_pos, "Factor1 POS")
+lrt_f1_neg <- add_pvals(hit_f1_neg, "Factor1 NEG")
+lrt_f3_pos <- add_pvals(hit_f3_pos, "Factor3 POS")
+lrt_f3_neg <- add_pvals(hit_f3_neg, "Factor3 NEG")
+```
+```{r}
+############################################
+# Save MEFISTO Factor 1 & 3 gene lists
+############################################
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(MOFA2)
+# Get weights matrix
+W <- get_weights(obj, views="RNA", as.data.frame=FALSE)$RNA
+
+# Helper to process a factor
+process_factor <- function(factor_number, factor_name, top_n = NULL) {
+
+  weights <- W[, factor_number]
+
+  df <- data.frame(
+    ENSG_version = names(weights),
+    Weight = weights,
+    stringsAsFactors = FALSE
+  )
+
+  # strip version
+  df$ENSG <- sub("\\..*$", "", df$ENSG_version)
+
+  # Add SYMBOL
+  df$SYMBOL <- mapIds(org.Hs.eg.db,
+                      keys = df$ENSG,
+                      column = "SYMBOL",
+                      keytype = "ENSEMBL",
+                      multiVals = "first")
+
+  # Split positive / negative
+  df_pos <- df[df$Weight > 0, ]
+  df_neg <- df[df$Weight < 0, ]
+
+  # Order by magnitude
+  df_pos <- df_pos[order(-df_pos$Weight), ]
+  df_neg <- df_neg[order(df_neg$Weight), ]
+
+  # Optional: limit to top_n by absolute magnitude
+  if (!is.null(top_n)) {
+    df_pos <- head(df_pos, top_n)
+    df_neg <- head(df_neg, top_n)
+  }
+
+  # Save
+  write.csv(df_pos,
+            paste0("MEFISTO_", factor_name, "_POS.csv"),
+            row.names = FALSE)
+
+  write.csv(df_neg,
+            paste0("MEFISTO_", factor_name, "_NEG.csv"),
+            row.names = FALSE)
+
+  cat("\nSaved:", factor_name, "\n")
+  cat("Positive genes:", nrow(df_pos), "\n")
+  cat("Negative genes:", nrow(df_neg), "\n")
+
+  invisible(list(pos=df_pos, neg=df_neg))
+}
+
+# ---- Run for Factor 1 and Factor 3 ----
+f1_lists <- process_factor(1, "Factor1")
+f3_lists <- process_factor(3, "Factor3")
+```
+
+```{r}
+############################################
+# Khatri + Netea gene lists -> HVG clusters + LRT p-values + CSV outputs
+############################################
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# ---- 1) Convert your lists to R vectors ----
+khatri_symbols <- c("ZDHHC17","FAS","GK","ICAM3","MME","PDE4B","PIK3CD","PTEN",
+  "RAF1","TLR1","PPP1R12A","MAPK14","SOS2","TXN","ASAH1","ATG3","BCAT1","BCL2L11",
+  "BTK","BTN2A2","CASP1","CCL2","CREB1","EP300","GNAI3","IL1A","JAK2","MAFB",
+  "MAP3K1","MAP3K3","PAK2","PLEKHO1","POU2F2","PRKAR1A","PRKCB","RHBDF2","SEMA6B",
+  "SP1","TLE4","BMPR2","CTNNB1","INPP5D","ITGAV","SLC12A7","TBK1","VAMP5","VRK2",
+  "YKT6","ANXA3","ARG1","AZU1","CAMP","CEACAM8","CEP55","CRISP2","CTSG","DEFA4",
+  "GADD45A","HMMR","KIF15","LCN2","LTF","OLFM4","ORM1","PRC1","SLPI","STOM","AQP9",
+  "BCL6","KLHL2","PPL","HTRA1","TYK2","SLC1A5","STX1A","ARL14EP","BPGM","BTN3A2",
+  "BUB3","CAMK4","CASP8","CCNB1IP1","CD247","CD3E","CD3G","DBT","DDX6","DYRK2",
+  "JAK1","KLRB1","MAP4K1","NCR3","PIK3R1","PLCG1","PPP2R5C","SEMA4F","SIDT1","SMAD4",
+  "SMYD2","TP53BP1","TRIB2","ZAP70","ZCCHC4","ZNF831")
+
+netea_impaired_symbols <- c("C22orf24","RLN3","SCN5A","CELF3","SHB","SLIT1","CR1L","KSR2","KEL",
+  "TP53TG5","TLCD1","LOX","ACTN3","TMEM74B","RUNDC3A","NR5A1","SH3D19","PITPNM3","MAGIX",
+  "CHRNG","IMPG2","FABP3","IGSF9","MYBPC3","MAP1LC3A","GPC3","TRPV3","LAMC3","RASL11A",
+  "NFE2","DOK4","ZFP92","SMOX","PTCRA","FKBP10","GNB3","PTPRH","MLX","TNXB","NOS1AP",
+  "PTPRN","CRMP1","ITGB4","PHKA1","BSN","TUB","FGFR4","LINGO3","MAP2","VWCE","SLC16A11",
+  "SCN4A","ELFN2","RADIL","EPN1","SLC9A5","GPC1","DISP2","COBL","SLC22A31","WFDC3",
+  "HSD17B14","CDHR2","GALR2","PRSS27","ATP6V0C","STX1B","SRMS","GPT","THBS1","UNC79",
+  "CASZ1","TRIOBP","COL4A2","NDRG4","DIRAS1","EPB42","TGFB1","MGAT5B","PPP1R3B","EVPL",
+  "DVL3","SMIM6","BCL2L1","KRT17","DYRK3","CDH24","DNAH17","CILP2","INPP5K","VWA3A",
+  "CDH4","CCDC173","KRT7","NLGN3","FAT2","SPTBN4","SCARA5","MMP19","ACSM2A","ADCY4",
+  "PRX","DCST1","TUBA8","CACNA1C","CACNA1F","MCF2L","ALPK3","PLIN4","TGFB2","USP43",
+  "TTLL4","RAB3A","TRIM54","KIRREL3","RTN2","PIGQ","KCND3","GJD3","FOXO4","SLC25A37",
+  "E2F2","NACAD","ITGB5","NTN1","SERPINE1","SEMA6B","MOSPD3","COL7A1","SLC16A2","FHOD3",
+  "RNF123","SRPK3","CASKIN2","DOCK6","HOXA10","FARP1","FAXDC2","TRPA1","CHADL","PMFBP1",
+  "TRAPPC9","PPM1E","HEYL","MROH6","HPN","PAK4","MED25","ST3GAL3","GLUL","RTN4RL2",
+  "DCST2","TRPV4","UBAP1","PNPLA2","SEMA6C","ZSWIM8","HS1BP3","SERINC2","WDR45","TSPAN9",
+  "CYP2F1","AQP1","DNAJB2","JAK3","NPRL3","HPS1","KLF17","EPOR","SPAG8","ZNF341","CIC",
+  "PERM1","CRTC1","CARHSP1","C7orf43","DMTN","CHRNA2","KY","RAPSN","PNMT","PCBP4","HBQ1",
+  "TYRO3","ESAM","GRINA","SHARPIN","EML2","DCDC2B","BEAN1","SYN1","GATA1","ARPC4","MMP14",
+  "LTBP2","ANK1","ATG9A","GSTM5","SDK2","MFSD2B","VWA7","ROM1","PCBP3","ADCY6","ZBTB7B",
+  "PRSS3","GJC2","EPHX3","LRRC3","SPNS2","HDAC11","COL23A1","TOM1L2","APC2","CRYM","PLXNA2",
+  "FUZ","RYR2","CDR2L","RNF208","RASGRP4","FBRS","NDUFA4L2","LAMA5","HRH2","TANGO2","KIFC3",
+  "CORO6","CRISPLD2","GBGT1","EHD2","CAPN11","BSG","ZNF219","REEP2","ADIPOR1","ABCB6","GAL3ST1",
+  "CALCOCO1","KCNN2","FKBP8","CDC34","PRKAR1B","ZNF213","WIPI2","PNKD","MLLT1","SLC36A1","MEF2B",
+  "UBE2H","PINK1","SPTB","MPP1","SAMD14","EFCC1","PRSS50","R3HDM4","CTIF","ST3GAL4","FBXL19",
+  "NATD1","STXBP2","CYB5R3","DGCR2","PLXNB1","NDOR1","ICAM5","PC","KIF3C","OSBP2","FAM189B",
+  "MTSS1L","WBP2","ANO2","GRIN3B","ABHD4","PLCD3","EMILIN1","CDH5","NOTCH3","NMNAT2","CRAT",
+  "SLC22A17","EGFL7","PLXNB3","CYB5R1","UBTD1","MMP25","DOK3","UNC13D","MINK1","EVI5L","PGD",
+  "PANX2","ZER1","CLU","FURIN","WDTC1","RNF10","TMEM63B")
+
+netea_balanced_symbols <- c("IDH3A","DKC1","ABCE1","DDX18","NCL","SET","HSPA9","HMGN4","NOP58","UFM1","MRPL42",
+  "AIMP1","BRIX1","MPHOSPH10","PAICS","DENR","CNOT7","NCBP2","NGDN","ARL5A","NDC1","HNRNPR","PDCL3","NFYB",
+  "TUBGCP5","GGCT","CAMK2D","THUMPD1","NUP88","RAN","WDR89","GNL3","FASTKD2","UBA2","TRMT10C","FAM35A","GNL2",
+  "PSMB1","UCHL3","DNAJC10","SYNJ2BP","ZZZ3","IARS","EIF5B","MAGOH","POP5","ENOPH1","HMGN3","ALG8","PBDC1","BZW2",
+  "DCAF17","CEBPZ","EXOSC2","LYRM2","SRFBP1","MATR3","TMEM123","REV1","LSM5","NDUFA12","RPL7L1","SNRPD1","CMSS1",
+  "HNRNPA3","FAM136A","DDX21","TBCCD1","TPRKB","ZNHIT6","THOC1","EBNA1BP2","CCT2","IQCB1","CCT6A","MTAP","RPF2",
+  "MALT1","YTHDF2","HSPD1","WDR75","BUB3","PRPF39","DNAJC21","SNRPF","CYCS","SLC25A32","LIPT1","TMEM170A","KLHL20",
+  "AEBP2","BOD1","NUP107","BTF3L4","LRPPRC","PNRC2","SS18L2","HYLS1","ZNF559","NPM1","CCDC59","STYX","RCN1","NOL11",
+  "CAPN7","TMEM192","HSPB11","NSMCE4A","USP16","SS18","HSPE1","RRP15","LTV1","RFX5","MAK16","MCPH1","NSA2","TTC27",
+  "RNMT","SLC35A3","CLNS1A","RIOK1","RBBP4","GCSH","TMEM243","SUPT16H","NOC3L","GNPNAT1","HAUS3","NIFK","SRSF3",
+  "PALB2","NAA25","PAK1IP1","PPWD1","TMEM50B","ICE2","DCUN1D4","PPP2R5E","PDHX","MRPL3","KRR1","SSB","RAD50",
+  "IMPACT","TYW3","TRIAP1","PRKRA","SKA2","PTCD3","MCCC1","PAIP1","SBDS","LRRC58","ESF1","ESCO1","TERF1","TGS1","ADO",
+  "RRN3","THUMPD3","MRFAP1L1","TIMM21","SERBP1","MDH1","HSPA14","SACS","METAP1","ZNF567","VRK1","EBAG9","FAM3C","EIF3E",
+  "CASD1","RYK","ZBTB21","RFC3","LYRM7","UTP3","RCN2","ZNF260","PPP1R8","FAM162A","MOCS2","FBXO5","ZFP1","FNBP4","TCERG1",
+  "C16orf87","SMIM19","RFC1","RABGGTB","METTL14","PIBF1","CCDC50","CCAR1","NCK1","CUL1","UPF3B","CUL5","MRPL1","GIMAP7",
+  "TMSB10","LSM8","ZCRB1","GLOD4","ATR","U2SURP","C1QBP","BCAS2","ZNF227","PPP1R2","CWC27","PPA1","KIAA1143","PWP1","VPS36",
+  "UBE2E1","ZNF57","SMARCE1","MAGEH1","SLTM","PPP3CC","NUDT15","THUMPD2","CYP20A1","TMEM126A","RSL1D1","MTX3","UPRT","PDS5A",
+  "MZT1","XPOT","FCF1","ZHX1","WDR43","RIOK2","TYW1","METTL8","OSBPL3","MRPS9","SRSF7","EXOSC8","LDHB","NUP43","ZNF14",
+  "FBXO21","MOAP1","SEH1L","ZNF75A","TIMM17A","C1orf174","CBFB","NOL8","FANCL","PDE12","ZMYM4","EXOC2","CRTAM","ORC3","R3HDM1",
+  "NPAT","SLC25A33","FKBP3","NUDT21","HNRNPDL","MRPL19","ZNF432","SNAPC5","TIMM9","TRAM1","YTHDC1","TMA16","ZNF121","UBE3A",
+  "PSMA3","UQCRC2","COPS8","NDUFAF4","GNPDA2","PRMT6","ZNF184","RPF1","TARSL2","BTBD1","UTP6","TM9SF3","PSMG1","ORMDL1",
+  "APPL1","MTF2","METTL18","MTR","TAF5","FOPNL","PRKX","ZNF765","IPO7","PAXIP1","GLO1")
+
+# ---- 2) Prep LRT + cluster maps (assumes these exist in your session) ----
+lrt_df <- as.data.frame(resLRT)
+lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+df_map <- clusters_hvg$df
+df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+# SYMBOL -> ENSG
+sym_to_ensg <- function(sym_vec) {
+  ensg <- mapIds(org.Hs.eg.db,
+                 keys = unique(sym_vec),
+                 column = "ENSEMBL",
+                 keytype = "SYMBOL",
+                 multiVals = "first")
+  ensg <- ensg[!is.na(ensg)]
+  data.frame(SYMBOL = names(ensg), ENSG = unname(ensg), stringsAsFactors = FALSE)
+}
+
+# Analyzer: returns a table you can save
+analyze_list <- function(symbols, list_name) {
+  m <- sym_to_ensg(symbols)
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by="ENSG")
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+  hit2 <- hit2[order(hit2$pvalue), ]
+
+  cat("\n====================\n", list_name, "\n====================\n", sep="")
+  cat("Input symbols:", length(symbols), "\n")
+  cat("Mapped to ENSG:", nrow(m), "\n")
+  cat("Found in top-5000 HVG clusters:", nrow(hit2), "\n")
+  if (nrow(hit2) > 0) {
+    cat("\nCounts per cluster:\n")
+    print(sort(table(hit2$cluster), decreasing = TRUE))
+    cat("\nTop genes by smallest LRT p-value:\n")
+    print(head(hit2[, c("SYMBOL","genes","cluster","pvalue","padj")], 25), row.names=FALSE)
+  }
+  hit2
+}
+
+# ---- 3) Run + save CSVs ----
+res_khatri <- analyze_list(khatri_symbols, "Khatri signature")
+write.csv(res_khatri, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/Khatri_signature_HVGclusters_LRT.csv", row.names = FALSE)
+
+res_netea_impaired <- analyze_list(netea_impaired_symbols, "Netea impaired")
+write.csv(res_netea_impaired, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/Netea_impaired_HVGclusters_LRT.csv", row.names = FALSE)
+
+res_netea_balanced <- analyze_list(netea_balanced_symbols, "Netea balanced")
+write.csv(res_netea_balanced, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/Netea_balanced_HVGclusters_LRT.csv", row.names = FALSE)
+```
+
+```{r}
+############################################
+# Save MEFISTO hit tables (clusters + optional LRT p-values) to CSV
+############################################
+
+# Optional: attach LRT p-values if your hit tables have ENSG column
+# If they DON'T have ENSG, we can derive it from 'genes' or add it safely.
+
+lrt_df <- as.data.frame(resLRT)
+lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+add_lrt <- function(hit) {
+  if (is.null(hit) || nrow(hit) == 0) return(hit)
+
+  # Ensure ENSG exists
+  if (!"ENSG" %in% colnames(hit)) {
+    if ("genes" %in% colnames(hit)) hit$ENSG <- sub("\\..*$", "", hit$genes)
+    else if ("ENSG_version" %in% colnames(hit)) hit$ENSG <- sub("\\..*$", "", hit$ENSG_version)
+  }
+
+  if (!"ENSG" %in% colnames(hit)) return(hit)  # can't attach
+
+  merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+}
+
+# Save raw cluster-mapped tables
+write.csv(hit_f1_pos, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor1_POS_HVGclusters.csv", row.names = FALSE)
+write.csv(hit_f1_neg, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor1_NEG_HVGclusters.csv", row.names = FALSE)
+write.csv(hit_f3_pos, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor3_POS_HVGclusters.csv", row.names = FALSE)
+write.csv(hit_f3_neg, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor3_NEG_HVGclusters.csv", row.names = FALSE)
+
+# Save versions with LRT p-values attached (recommended)
+hit_f1_pos_lrt <- add_lrt(hit_f1_pos)
+hit_f1_neg_lrt <- add_lrt(hit_f1_neg)
+hit_f3_pos_lrt <- add_lrt(hit_f3_pos)
+hit_f3_neg_lrt <- add_lrt(hit_f3_neg)
+
+write.csv(hit_f1_pos_lrt, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor1_POS_HVGclusters_LRT.csv", row.names = FALSE)
+write.csv(hit_f1_neg_lrt, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor1_NEG_HVGclusters_LRT.csv", row.names = FALSE)
+write.csv(hit_f3_pos_lrt, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor3_POS_HVGclusters_LRT.csv", row.names = FALSE)
+write.csv(hit_f3_neg_lrt, "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/MEFISTO_Factor3_NEG_HVGclusters_LRT.csv", row.names = FALSE)
+
+cat("Saved 8 CSVs (4 cluster-only + 4 with LRT p-values).\n")
+```
+```{r}
+############################################
+# Robust: read MSigDB/GSEA file + map to clusters + attach LRT
+############################################
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# ---------- 1) Robust gene set reader ----------
+read_msigdb_geneset <- function(path) {
+  # Try as TSV table first
+  tab <- try(read.delim(path, header = TRUE, sep = "\t", stringsAsFactors = FALSE, check.names = FALSE),
+             silent = TRUE)
+
+  if (!inherits(tab, "try-error")) {
+    # Case A: key/value style (2 columns)
+    if (ncol(tab) >= 2 && any(tab[[1]] == "GENE_SYMBOLS")) {
+      gene_str <- tab[tab[[1]] == "GENE_SYMBOLS", 2][1]
+      return(trimws(unlist(strsplit(gene_str, ","))))
+    }
+
+    # Case B: wide single-row format with a column named GENE_SYMBOLS
+    if ("GENE_SYMBOLS" %in% colnames(tab)) {
+      gene_str <- tab$GENE_SYMBOLS[1]
+      return(trimws(unlist(strsplit(gene_str, ","))))
+    }
+  }
+
+  # Fallback: line-based parsing
+  x <- readLines(path, warn = FALSE)
+  gene_line <- x[grepl("^GENE_SYMBOLS\\b", x)]
+
+  # Sometimes it's "GENE_SYMBOLS\t...." not space
+  if (length(gene_line) != 1) stop("Could not uniquely find GENE_SYMBOLS in file: ", path)
+
+  gene_str <- sub("^GENE_SYMBOLS\\s*", "", gene_line)
+  gene_str <- sub("^GENE_SYMBOLS\\t*", "", gene_str)
+  trimws(unlist(strsplit(gene_str, ",")))
+}
+
+# ---------- 2) Robust analyzer (does NOT assume columns exist) ----------
+analyze_list_safe <- function(symbols, list_name, clusters_obj, resLRT_obj) {
+
+  # clusters df: must have genes + cluster
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes","cluster") %in% colnames(df_map)))
+
+  # Add cleaned ENSG column
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  # LRT df
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  # SYMBOL -> ENSG
+  ensg <- mapIds(org.Hs.eg.db,
+                 keys = unique(symbols),
+                 column = "ENSEMBL",
+                 keytype = "SYMBOL",
+                 multiVals = "first")
+  ensg <- ensg[!is.na(ensg)]
+  m <- data.frame(SYMBOL = names(ensg), ENSG = unname(ensg), stringsAsFactors = FALSE)
+
+  # Map into clusters
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by = "ENSG")
+
+  # Attach pvalues/padj
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by = "ENSG", all.x = TRUE)
+  hit2 <- hit2[order(hit2$pvalue), ]
+
+  cat("\n====================\n", list_name, "\n====================\n", sep="")
+  cat("Input symbols:", length(symbols), "\n")
+  cat("Mapped to ENSG:", nrow(m), "\n")
+  cat("Found in clustered set:", nrow(hit2), "\n")
+  if (nrow(hit2) > 0) {
+    cat("\nCounts per cluster:\n")
+    print(sort(table(hit2$cluster), decreasing = TRUE))
+    cat("\nTop genes by smallest LRT p-value:\n")
+    print(head(hit2[, c("SYMBOL","genes","cluster","pvalue","padj")], 25), row.names = FALSE)
+  }
+
+  hit2
+}
+```
+
+```{r}
+# ---- 0) Make sure these exist from your DESeq2 LRT clustering run ----
+# clusters   (degPatterns output for sig_LRT genes)
+# resLRT     (DESeq2 LRT results object)
+
+# ---- 1) List your gene set files here ----
+geneset_files <- list(
+  HALLMARK_GLYCOLYSIS = "/Users/chhugani/Downloads/HALLMARK_GLYCOLYSIS.v2026.1.Hs.tsv",
+  HALLMARK_OXIDATIVE_PHOSPHORYLATION = "/Users/chhugani/Downloads/HALLMARK_OXIDATIVE_PHOSPHORYLATION.v2026.1.Hs.tsv",
+  HALLMARK_MITOCHONDRIA = "/Users/chhugani/Downloads/GOCC_MITOCHONDRION.v2026.1.Hs.tsv", 
+  
+
+  # add more, e.g.
+  # HALLMARK_HYPOXIA = "/Users/chhugani/Downloads/HALLMARK_HYPOXIA.v2026.1.Hs.tsv"
+)
+
+# ---- 2) Output folder ----
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---- 3) Run them all ----
+results_list <- list()
+
+for (set_name in names(geneset_files)) {
+
+  cat("\n=============================\nRunning:", set_name, "\n=============================\n")
+
+  # read symbols from file
+  symbols <- read_msigdb_geneset(geneset_files[[set_name]])
+
+  # map to clusters + attach LRT pvals
+  hit <- analyze_list_safe(symbols, set_name, clusters_obj = clusters, resLRT_obj = resLRT)
+
+  # save
+  out_file <- file.path(out_dir, paste0(set_name, "_sigLRTclusters_LRT.csv"))
+  write.csv(hit, out_file, row.names = FALSE)
+
+  results_list[[set_name]] <- hit
+}
+
+# results_list now contains your hit tables in memory too
+names(results_list)
+
+```
+
+```{r}
+############################################
+# Khatri + Netea -> sigLRT clusters + LRT pvals + CSVs
+############################################
+
+# Assumes these already exist in your session:
+#  - clusters   (degPatterns output for sig_LRT genes, i.e., p < 0.05 set)
+#  - resLRT     (DESeq2 LRT results)
+#  - analyze_list_safe()  (the robust function)
+#  - out_dir    (or define below)
+
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# ---- Put your symbol lists into this named list ----
+gene_sets <- list(
+  Khatri = khatri_symbols,
+  Netea_Impaired = netea_impaired_symbols,
+  Netea_Balanced = netea_balanced_symbols
+)
+
+results_list_framework <- list()
+
+for (set_name in names(gene_sets)) {
+
+  cat("\n=============================\nRunning:", set_name, "\n=============================\n")
+
+  hit <- analyze_list_safe(
+    symbols      = gene_sets[[set_name]],
+    list_name    = set_name,
+    clusters_obj = clusters,
+    resLRT_obj   = resLRT
+  )
+
+  out_file <- file.path(out_dir, paste0(set_name, "_sigLRTclusters_LRT.csv"))
+  write.csv(hit, out_file, row.names = FALSE)
+
+  results_list_framework[[set_name]] <- hit
+}
+
+# Optional: quick cluster count summaries
+cluster_summaries <- lapply(results_list_framework, function(df) sort(table(df$cluster), decreasing = TRUE))
+cluster_summaries
+
+
+
+```
+```{r}
+############################################
+# Robust mapping for gene sets (handles 1:many and 0 mappings)
+############################################
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+analyze_list_safe2 <- function(symbols, list_name, clusters_obj, resLRT_obj) {
+
+  # clean symbols
+  symbols <- unique(trimws(symbols))
+  symbols <- symbols[nzchar(symbols)]
+
+  # clusters df: must have genes + cluster
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes","cluster") %in% colnames(df_map)))
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  # LRT df
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  # SYMBOL -> ENSEMBL mapping (explicit, supports 1:many)
+  m <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys     = symbols,
+    columns  = c("SYMBOL","ENSEMBL"),
+    keytype  = "SYMBOL"
+  )
+  m <- m[!is.na(m$ENSEMBL) & !is.na(m$SYMBOL), c("SYMBOL","ENSEMBL")]
+  m <- unique(m)
+  colnames(m)[colnames(m) == "ENSEMBL"] <- "ENSG"
+
+  cat("\n====================\n", list_name, "\n====================\n", sep="")
+  cat("Input symbols:", length(symbols), "\n")
+  cat("Mapped SYMBOL->ENSG rows:", nrow(m), "\n")
+
+  if (nrow(m) == 0) {
+    cat("No symbols mapped to ENSEMBL. Returning empty table.\n")
+    return(data.frame())
+  }
+
+  # Map into clusters
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by="ENSG")
+
+  cat("Found in clustered set:", nrow(hit), "\n")
+  if (nrow(hit) == 0) {
+    cat("No mapped genes overlap the clustered genes. Returning empty table.\n")
+    return(data.frame())
+  }
+
+  # Attach pvalues/padj
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+  hit2 <- hit2[order(hit2$pvalue), ]
+
+  cat("\nCounts per cluster:\n")
+  print(sort(table(hit2$cluster), decreasing = TRUE))
+
+  cat("\nTop genes by smallest LRT p-value:\n")
+  print(head(hit2[, c("SYMBOL","genes","cluster","pvalue","padj")], 25), row.names=FALSE)
+
+  hit2
+}
+
+mito_symbols <- read_msigdb_geneset("/Users/chhugani/Downloads/GOCC_MITOCHONDRION.v2026.1.Hs.tsv")
+
+res_mito <- analyze_list_safe2(
+  symbols      = mito_symbols,
+  list_name    = "HALLMARK_MITOCHONDRIA",
+  clusters_obj = clusters,
+  resLRT_obj   = resLRT
+)
+
+write.csv(
+  res_mito,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/GOCC_MITOCHONDRION_sigLRTclusters_LRT.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+############################################
+# Plot individual trajectories for gene-set hits
+# (one plot per gene; uses vsd + meta + res_mito)
+############################################
+library(ggplot2)
+
+# ---- INPUTS you should already have ----
+# vsd   : from vst(dds_lrt, blind=FALSE)
+# meta  : as.data.frame(colData(dds_lrt)) or your metadata aligned to vsd columns
+# res_mito : output of analyze_list_safe2() for mitochondria
+
+stopifnot(exists("vsd"))
+stopifnot(exists("meta"))
+stopifnot(exists("res_mito"))
+
+# Ensure Sample column exists + matches vsd
+if (!"Sample" %in% colnames(meta)) meta$Sample <- rownames(meta)
+
+# Day ordering
+meta$Day <- factor(as.character(meta$Day), levels = c("1","3","5","7"))
+meta$Status <- factor(meta$Status)
+
+# Expression matrix (all genes x samples)
+expr_all <- assay(vsd)
+
+# Genes to plot (use the exact IDs in res_mito$genes when possible)
+genes_to_plot <- unique(res_mito$genes)
+genes_to_plot <- genes_to_plot[!is.na(genes_to_plot)]
+
+# Helper: match ENSG IDs even if version differs
+strip_ver <- function(x) sub("\\..*$", "", x)
+
+rownames_clean <- strip_ver(rownames(expr_all))
+genes_clean <- strip_ver(genes_to_plot)
+
+# Build a mapping from requested gene IDs -> actual rownames present in expr_all
+map_idx <- match(genes_clean, rownames_clean)
+keep <- !is.na(map_idx)
+
+if (sum(keep) == 0) stop("None of the res_mito genes were found in vsd/expr matrix.")
+
+genes_found <- genes_to_plot[keep]
+row_ids_found <- rownames(expr_all)[map_idx[keep]]
+
+cat("Requested genes:", length(genes_to_plot), "\n")
+cat("Found in vsd matrix:", length(row_ids_found), "\n")
+
+# Output directory for plots
+plot_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/MEFISTO/mitochondria_gene_trajectories"
+dir.create(plot_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Plot loop: one gene per file
+for (i in seq_along(row_ids_found)) {
+
+  gene_row <- row_ids_found[i]
+  gene_req <- genes_found[i]
+
+  # get SYMBOL if available
+  sym <- NA
+  if ("SYMBOL" %in% colnames(res_mito)) {
+    sym <- res_mito$SYMBOL[match(gene_req, res_mito$genes)]
+    if (length(sym) == 0) sym <- NA
+  }
+
+  df <- data.frame(
+    Sample = colnames(expr_all),
+    Expr   = as.numeric(expr_all[gene_row, ]),
+    stringsAsFactors = FALSE
+  )
+
+  df <- merge(df, meta, by = "Sample")
+
+  p <- ggplot(df, aes(x = Day, y = Expr, color = Status, group = Status)) +
+    geom_point(alpha = 0.8, position = position_jitter(width = 0.08, height = 0)) +
+    stat_summary(fun = mean, geom = "line", linewidth = 1.1) +
+    theme_classic() +
+    labs(
+      title = paste0(ifelse(is.na(sym), gene_row, paste0(sym, " (", gene_row, ")"))),
+      y = "VST expression",
+      x = "Day"
+    )
+
+  # Save
+  out_png <- file.path(plot_dir, paste0(gene_row, "_trajectory.png"))
+  ggsave(out_png, p, width = 6.5, height = 4.2, dpi = 300)
+
+  print(p)
+}
+
+cat("\nSaved plots to:\n", plot_dir, "\n")
+```
+```{r}
+
+#February 23rd 2026 want to plot only Days 1-3 
+library(DESeq2)
+
+############################################
+# NEW ANALYSIS: Days 1–3 only (separate objects)
+############################################
+
+library(DESeq2)
+library(matrixStats)
+library(DEGreport)
+
+# -------------------------
+# 1) Subset metadata to Days 1 and 3
+# -------------------------
+
+coldata_13 <- coldata[coldata$Day %in% c("1","3"), ]
+cts_13 <- cts[, rownames(coldata_13)]
+
+coldata_13$Status <- factor(coldata_13$Status)
+coldata_13$Day_13 <- factor(as.character(coldata_13$Day), levels = c("1","3"))
+
+# -------------------------
+# 2) Create DESeq object (new name!)
+# -------------------------
+
+dds_13 <- DESeqDataSetFromMatrix(
+  countData = cts_13,
+  colData   = coldata_13,
+  design    = ~ Status + Day_13 + Status:Day_13
+)
+
+# Basic gene filter
+keep_13 <- rowSums(counts(dds_13) >= 10) >= 3
+dds_13  <- dds_13[keep_13, ]
+
+# -------------------------
+# 3) LRT for interaction
+# -------------------------
+
+dds_lrt_13 <- DESeq(
+  dds_13,
+  test    = "LRT",
+  reduced = ~ Status + Day_13
+)
+
+resLRT_13 <- results(dds_lrt_13)
+summary(resLRT_13)
+
+# -------------------------
+# 4) Significant genes (raw p < 0.05)
+# -------------------------
+
+sig_LRT_13 <- resLRT_13[
+  !is.na(resLRT_13$pvalue) & resLRT_13$pvalue < 0.05,
+]
+
+sig_genes_13 <- rownames(sig_LRT_13)
+
+cat("Significant trajectory genes (Days 1–3):",
+    length(sig_genes_13), "\n")
+
+# -------------------------
+# 5) VST transform
+# -------------------------
+
+vsd_13 <- vst(dds_lrt_13, blind = FALSE)
+
+norm_mat_13 <- assay(vsd_13)[sig_genes_13, , drop = FALSE]
+
+# -------------------------
+# 6) Clustering (Days 1–3 only)
+# -------------------------
+
+meta_13 <- as.data.frame(colData(dds_lrt_13))
+meta_13$Day_13 <- factor(meta_13$Day_13, levels = c("1","3"))
+meta_13$Status <- factor(meta_13$Status)
+
+clusters_13 <- degPatterns(
+  norm_mat_13,
+  metadata = meta_13,
+  time     = "Day_13",
+  col      = "Status"
+)
+
+# View clusters
+head(clusters_13$df)
+
+# Plot
+clusters_13$plot
+
+```
+```{r}
+#screening Day 1-3 clusters for hallmark gene lists 
+
+############################################
+# Screen hallmark gene sets against clusters_13
+# Output: SYMBOL | ENSG | cluster | pvalue | padj | GeneSet
+############################################
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+results_list_13 <- list()
+
+for (set_name in names(geneset_files)) {
+
+  cat("\n=============================\nRunning:", set_name, "\n=============================\n")
+
+  # 1) Read symbols
+  symbols <- read_msigdb_geneset(geneset_files[[set_name]])
+  symbols <- unique(trimws(symbols))
+
+  # 2) Prepare cluster dataframe
+  df_map <- clusters_13$df
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  # 3) Prepare LRT results
+  lrt_df <- as.data.frame(resLRT_13)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  # 4) Map SYMBOL -> ENSEMBL
+  m <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys = symbols,
+    columns = c("SYMBOL","ENSEMBL"),
+    keytype = "SYMBOL"
+  )
+
+  m <- m[!is.na(m$ENSEMBL), ]
+  m$ENSG <- m$ENSEMBL
+  m <- unique(m[, c("SYMBOL","ENSG")])
+
+  # 5) Merge into clusters
+  hit <- merge(m, df_map[, c("ENSG","cluster")], by="ENSG")
+
+  # 6) Attach pvalues
+  hit <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+
+  # 7) Add gene set label
+  hit$GeneSet <- set_name
+
+  # 8) Keep only relevant columns
+  hit <- hit[, c("SYMBOL","ENSG","cluster","pvalue","padj","GeneSet")]
+
+  # 9) Sort by p-value
+  hit <- hit[order(hit$pvalue), ]
+
+  print(head(hit, 10))
+
+  # Save
+  out_file <- file.path(out_dir,
+                        paste0(set_name, "Hallmark_genes_Days1_3_clusters_LRT.csv"))
+  write.csv(hit, out_file, row.names=FALSE)
+
+  results_list_13[[set_name]] <- hit
+}
+
+names(results_list_13)
+```
+ 
+```{r}
+############################################
+# Screen Day 1–3 clusters for prefix genes (IL/CD/CXCL/CXC/AMP/MMP/NOS/TLR)
+# Output: SYMBOL | ENSG | genes | cluster | pvalue | padj | Prefix
+############################################
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+stopifnot(exists("clusters_13"))
+stopifnot(exists("resLRT_13"))
+
+# 1) Get clustered genes + cluster IDs
+df_map_13 <- clusters_13$df
+stopifnot(all(c("genes","cluster") %in% colnames(df_map_13)))
+
+df_map_13$ENSG <- sub("\\..*$", "", df_map_13$genes)
+df_map_13 <- unique(df_map_13[, c("genes","ENSG","cluster")])
+
+# 2) LRT results (Days 1–3)
+lrt_13 <- as.data.frame(resLRT_13)
+lrt_13$ENSG <- sub("\\..*$", "", rownames(lrt_13))
+lrt_13 <- lrt_13[, c("ENSG","pvalue","padj")]
+
+# 3) Map ENSG -> SYMBOL (may be 1:many; we’ll keep unique pairs)
+m <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = unique(df_map_13$ENSG),
+  columns = c("ENSEMBL","SYMBOL"),
+  keytype = "ENSEMBL"
+)
+m <- m[!is.na(m$SYMBOL) & !is.na(m$ENSEMBL), ]
+colnames(m)[colnames(m) == "ENSEMBL"] <- "ENSG"
+m <- unique(m[, c("ENSG","SYMBOL")])
+
+# 4) Merge: clusters + SYMBOL + pvalues
+df_annot <- merge(df_map_13, m, by = "ENSG")
+df_annot <- merge(df_annot, lrt_13, by = "ENSG", all.x = TRUE)
+
+# 5) Filter SYMBOL prefixes
+prefixes <- c("IL","CD","CXCL","CXC","AMP","MMP","NOS","TLR")
+pattern  <- paste0("^(", paste(prefixes, collapse="|"), ")")
+
+hits_prefix <- df_annot[grepl(pattern, df_annot$SYMBOL), ]
+
+# Add which prefix matched
+hits_prefix$Prefix <- sub(pattern, "\\1", hits_prefix$SYMBOL)
+
+# 6) Clean + sort
+hits_prefix <- hits_prefix[, c("Prefix","SYMBOL","ENSG","genes","cluster","pvalue","padj")]
+hits_prefix <- hits_prefix[order(hits_prefix$pvalue), ]
+
+# 7) Quick summaries
+cat("Total prefix hits:", nrow(hits_prefix), "\n\n")
+cat("Hits per prefix:\n")
+print(sort(table(hits_prefix$Prefix), decreasing = TRUE))
+
+cat("\nHits per cluster:\n")
+print(sort(table(hits_prefix$cluster), decreasing = TRUE))
+
+# Preview
+head(hits_prefix, 30)
+
+# 8) Save CSV
+out_file <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Day1_3_prefixGenes_cluster_pvalues.csv"
+write.csv(hits_prefix, out_file, row.names = FALSE)
+cat("\nSaved:", out_file, "\n")
+```
+
+```{r}
+############################################################
+# FEBRUARY 24TH 2026 -RUN ALL HALLMARK TSV GENE SETS AGAINST DESEQ2 LRT CLUSTERS DAY 1-7, p < 0.05
+############################################################
+
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# --- MSigDB v2026.1 .tsv format reader (key<TAB>value; genes in GENE_SYMBOLS or SOURCE_MEMBERS) ---
+read_msigdb_tsv_symbols <- function(tsv_path) {
+  lines <- readLines(tsv_path, warn = FALSE)
+
+  # Prefer GENE_SYMBOLS; fallback to SOURCE_MEMBERS
+  gs_line <- grep("^GENE_SYMBOLS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) gs_line <- grep("^SOURCE_MEMBERS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) return(character(0))
+
+  # Split value (after tab) by comma
+  val <- sub("^[^\t]*\t", "", gs_line[1])
+  syms <- unlist(strsplit(val, ",", fixed = TRUE), use.names = FALSE)
+  syms <- unique(trimws(syms))
+  syms[nzchar(syms)]
+}
+
+# --- Core mapping: SYMBOL -> ENSG -> cluster (+ optional LRT p/padj) ---
+map_symbols_to_clusters <- function(symbols, set_name, clusters_obj, resLRT_obj) {
+
+  symbols <- unique(trimws(as.character(symbols)))
+  symbols <- symbols[nzchar(symbols)]
+  if (length(symbols) == 0) return(data.frame())
+
+  # cluster gene->cluster mapping
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes","cluster") %in% colnames(df_map)))
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  # LRT results
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  # SYMBOL -> ENSEMBL (1:many safe)
+  m <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys     = symbols,
+    columns  = c("SYMBOL","ENSEMBL"),
+    keytype  = "SYMBOL"
+  )
+  m <- m[!is.na(m$SYMBOL) & !is.na(m$ENSEMBL), c("SYMBOL","ENSEMBL")]
+  m <- unique(m)
+  colnames(m)[colnames(m) == "ENSEMBL"] <- "ENSG"
+  if (nrow(m) == 0) return(data.frame())
+
+  # overlap with clustered genes
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by = "ENSG")
+  if (nrow(hit) == 0) return(data.frame())
+
+  # attach LRT stats (optional but usually helpful)
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+
+  hit2$geneset <- set_name
+  hit2 <- hit2[, c("geneset","SYMBOL","ENSG","genes","cluster","pvalue","padj")]
+  hit2[order(hit2$geneset, hit2$cluster, hit2$pvalue), ]
+}
+
+# --- WRAPPER: run every TSV in a directory and write ONE combined gene-level CSV ---
+run_all_msigdb_tsvs_to_clusters <- function(tsv_dir, out_csv, clusters_obj, resLRT_obj,
+                                           pattern="\\.tsv$") {
+
+  files <- list.files(tsv_dir, pattern = pattern, full.names = TRUE)
+  stopifnot(length(files) > 0)
+
+  all_hits <- list()
+
+  for (f in files) {
+    set_name <- tools::file_path_sans_ext(basename(f))
+    symbols  <- read_msigdb_tsv_symbols(f)
+
+    cat("\n---", set_name, "---\n")
+    cat("Input symbols:", length(symbols), "\n")
+
+    hit2 <- map_symbols_to_clusters(symbols, set_name, clusters_obj, resLRT_obj)
+
+    cat("Mapped rows:", nrow(hit2), "\n")
+    if (nrow(hit2) > 0) {
+      cat("Unique ENSG mapped:", length(unique(hit2$ENSG)), "\n")
+      cat("Cluster counts (unique ENSG):\n")
+      print(sort(table(unique(hit2[, c("ENSG","cluster")])$cluster), decreasing = TRUE))
+      all_hits[[set_name]] <- hit2
+    }
+  }
+
+  out <- if (length(all_hits) > 0) do.call(rbind, all_hits) else data.frame()
+  write.csv(out, out_csv, row.names = FALSE)
+
+  cat("\nWrote combined gene-level mappings to:\n", out_csv, "\n")
+  invisible(out)
+}
+
+#PATHS
+
+tsv_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes"
+# choose an output DIRECTORY
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+
+# make sure it exists
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# choose an output FILE inside it
+out_csv <- file.path(out_dir, "HALLMARK_all_geneLevel_LRTclusters.csv")
+
+# then run
+all_gene_mappings <- run_all_msigdb_tsvs_to_clusters(
+  tsv_dir      = tsv_dir,
+  out_csv      = out_csv,
+  clusters_obj = clusters,
+  resLRT_obj   = resLRT
+)
+```
+
+```{r}
+############################################################
+# RUN ALL MSIGDB TSV GENE SETS AGAINST DAY 1–3 LRT CLUSTERS
+# Requires: clusters_13 and resLRT_13 already created
+############################################################
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+read_msigdb_tsv_symbols <- function(tsv_path) {
+  lines <- readLines(tsv_path, warn = FALSE)
+
+  gs_line <- grep("^GENE_SYMBOLS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) gs_line <- grep("^SOURCE_MEMBERS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) return(character(0))
+
+  val <- sub("^[^\t]*\t", "", gs_line[1])
+  syms <- unlist(strsplit(val, ",", fixed = TRUE), use.names = FALSE)
+  syms <- unique(trimws(syms))
+  syms[nzchar(syms)]
+}
+
+map_symbols_to_clusters <- function(symbols, set_name, clusters_obj, resLRT_obj) {
+
+  symbols <- unique(trimws(as.character(symbols)))
+  symbols <- symbols[nzchar(symbols)]
+  if (length(symbols) == 0) return(data.frame())
+
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes","cluster") %in% colnames(df_map)))
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  m <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys     = symbols,
+    columns  = c("SYMBOL","ENSEMBL"),
+    keytype  = "SYMBOL"
+  )
+  m <- m[!is.na(m$SYMBOL) & !is.na(m$ENSEMBL), c("SYMBOL","ENSEMBL")]
+  m <- unique(m)
+  colnames(m)[colnames(m) == "ENSEMBL"] <- "ENSG"
+  if (nrow(m) == 0) return(data.frame())
+
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by = "ENSG")
+  if (nrow(hit) == 0) return(data.frame())
+
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by="ENSG", all.x=TRUE)
+
+  hit2$geneset <- set_name
+  hit2 <- hit2[, c("geneset","SYMBOL","ENSG","genes","cluster","pvalue","padj")]
+  hit2[order(hit2$geneset, hit2$cluster, hit2$pvalue), ]
+}
+
+run_all_msigdb_tsvs_to_clusters <- function(tsv_dir, out_csv, clusters_obj, resLRT_obj,
+                                           pattern="\\.tsv$") {
+
+  files <- list.files(tsv_dir, pattern = pattern, full.names = TRUE)
+  stopifnot(length(files) > 0)
+
+  all_hits <- list()
+
+  for (f in files) {
+    set_name <- tools::file_path_sans_ext(basename(f))
+    symbols  <- read_msigdb_tsv_symbols(f)
+
+    cat("\n---", set_name, "(Day 1–3) ---\n")
+    cat("Input symbols:", length(symbols), "\n")
+
+    hit2 <- map_symbols_to_clusters(symbols, set_name, clusters_obj, resLRT_obj)
+
+    cat("Mapped rows:", nrow(hit2), "\n")
+    if (nrow(hit2) > 0) {
+      cat("Unique ENSG mapped:", length(unique(hit2$ENSG)), "\n")
+      cat("Cluster counts (unique ENSG):\n")
+      print(sort(table(unique(hit2[, c("ENSG","cluster")])$cluster), decreasing = TRUE))
+      all_hits[[set_name]] <- hit2
+    }
+  }
+
+  out <- if (length(all_hits) > 0) do.call(rbind, all_hits) else data.frame()
+  write.csv(out, out_csv, row.names = FALSE)
+
+  cat("\nWrote combined gene-level mappings to:\n", out_csv, "\n")
+  invisible(out)
+}
+
+############################################################
+# EDIT PATHS
+############################################################
+tsv_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes"
+# choose an output DIRECTORY
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+out_csv_13 <- file.path(out_dir, paste0("HALLMARK_all_geneLevel_LRTclusters_Day1-3_", Sys.Date(), ".csv"))
+
+############################################################
+# RUN AGAINST DAY 1–3 OBJECTS
+############################################################
+all_gene_mappings_13 <- run_all_msigdb_tsvs_to_clusters(
+  tsv_dir      = tsv_dir,
+  out_csv      = out_csv_13,
+  clusters_obj = clusters_13,
+  resLRT_obj   = resLRT_13
+)
+```
+
+```{r}
+############################################################
+# COMPARE TWO LRT CLUSTER OUTPUT FILES BY SYMBOL
+############################################################
+
+# ---- 1) Read the two CSVs ----
+file_all_days  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results/HALLMARK_all_geneLevel_LRTclusters_sig.csv"
+file_day13     <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results/HALLMARK_all_geneLevel_LRTclusters_Day1-3_2026-02-24_sig.csv"
+
+df_all  <- read.csv(file_all_days, stringsAsFactors = FALSE)
+df_13   <- read.csv(file_day13, stringsAsFactors = FALSE)
+
+# ---- 2) Get unique SYMBOL vectors ----
+sym_all <- unique(df_all$SYMBOL)
+sym_13  <- unique(df_13$SYMBOL)
+
+# ---- 3) Overlap + unique sets ----
+overlap_symbols   <- intersect(sym_all, sym_13)
+only_all_days     <- setdiff(sym_all, sym_13)
+only_day13        <- setdiff(sym_13, sym_all)
+
+cat("Total symbols (All Days):", length(sym_all), "\n")
+cat("Total symbols (Day 1–3):", length(sym_13), "\n")
+cat("Overlapping symbols:", length(overlap_symbols), "\n")
+cat("Only in All Days:", length(only_all_days), "\n")
+cat("Only in Day 1–3:", length(only_day13), "\n")
+
+# ---- 4) Save overlapping SYMBOL list ----
+write.csv(
+  data.frame(SYMBOL = overlap_symbols),
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results/Overlapping_HALLMARK_SYMBOLS.csv",
+  row.names = FALSE
+)
+
+# ---- 5) Optional: merge full rows for overlapping genes ----
+merged_overlap <- merge(
+  df_all[df_all$SYMBOL %in% overlap_symbols, ],
+  df_13[df_13$SYMBOL %in% overlap_symbols, ],
+  by = "SYMBOL",
+  suffixes = c("_AllDays", "_Day1_3")
+)
+
+write.csv(
+  merged_overlap,
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_ResultsOverlapping_Genes_FullRows.csv",
+  row.names = FALSE
+)
+
+
+############################################################
+# SAVE ALL SYMBOL GROUPS
+############################################################
+
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# 1) Overlapping genes
+write.csv(
+  data.frame(SYMBOL = sort(overlap_symbols)),
+  file.path(out_dir, "Overlapping_HALLMARK_SYMBOLS.csv"),
+  row.names = FALSE
+)
+
+# 2) Only in All Days
+write.csv(
+  data.frame(SYMBOL = sort(only_all_days)),
+  file.path(out_dir, "Only_AllDays_HALLMARK_SYMBOLS.csv"),
+  row.names = FALSE
+)
+
+# 3) Only in Day 1–3
+write.csv(
+  data.frame(SYMBOL = sort(only_day13)),
+  file.path(out_dir, "Only_Day1-3_HALLMARK_SYMBOLS.csv"),
+  row.names = FALSE
+)
+
+# 4) Combined labeled file (useful for plotting or enrichment later)
+combined_df <- rbind(
+  data.frame(SYMBOL = overlap_symbols, Group = "Overlap"),
+  data.frame(SYMBOL = only_all_days,   Group = "AllDays_Only"),
+  data.frame(SYMBOL = only_day13,      Group = "Day1-3_Only")
+)
+
+write.csv(
+  combined_df,
+  file.path(out_dir, "HALLMARK_SYMBOLS_AllGroups_Labeled.csv"),
+  row.names = FALSE
+)
+
+cat("\nAll gene symbol lists saved successfully.\n")
+############################################################
+# DONE
+############################################################
+```
+
+```{r}
+#connecting xCell type to these sig hallmark genes to LRT clusters
+
+############################################################
+# Robust xCell CSV reader + annotate BOTH LRT hallmark CSVs
+############################################################
+
+# ---------- EDIT THESE PATHS ----------
+xcell_file <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/xcell_results/xCell_cell_to_genes_supp.csv"
+
+lrt_all_days_csv <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results/HALLMARK_all_geneLevel_LRTclusters_sig.csv"
+lrt_day13_csv    <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results/HALLMARK_all_geneLevel_LRTclusters_Day1-3_2026-02-24_sig.csv"
+
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+############################################################
+# 1) Build SYMBOL -> xCell_cell_type map (ROBUST)
+############################################################
+build_xcell_symbol_map <- function(xcell_path) {
+
+  # --- Try comma CSV ---
+  x <- tryCatch(
+    read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e) NULL
+  )
+
+  # --- If 1 column, try semicolon CSV (common Excel export) ---
+  if (is.null(x) || ncol(x) < 2) {
+    x <- tryCatch(
+      read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE, sep = ";"),
+      error = function(e) NULL
+    )
+  }
+
+  # --- If STILL 1 column, parse lines manually ---
+  if (is.null(x) || ncol(x) < 2) {
+    lines <- readLines(xcell_path, warn = FALSE)
+    lines <- lines[nzchar(trimws(lines))]
+    if (length(lines) < 2) stop("xCell file looks empty or unreadable: ", xcell_path)
+
+    # Detect delimiter from header
+    header <- lines[1]
+    delim <- if (grepl(";", header, fixed = TRUE)) ";" else ","
+
+    parts <- strsplit(lines, delim, fixed = TRUE)
+    max_len <- max(lengths(parts))
+    mat <- t(vapply(parts, function(p) { length(p) <- max_len; p }, character(max_len)))
+
+    x <- as.data.frame(mat, stringsAsFactors = FALSE, check.names = FALSE)
+
+    # Set header
+    colnames(x) <- x[1, ]
+    x <- x[-1, , drop = FALSE]
+  }
+
+  if (ncol(x) < 2) stop("Could not read xCell file into >=2 columns. Check delimiter/format.")
+
+  # Assume wide format: col1=celltype, col2=# genes (optional), rest=genes
+  celltype_col <- colnames(x)[1]
+
+  # Determine if column 2 is numeric-ish (# genes)
+  second_col_numeric <- suppressWarnings(all(is.na(x[[2]]) | !is.na(as.numeric(as.character(x[[2]])))))
+  gene_cols <- if (second_col_numeric) 3:ncol(x) else 2:ncol(x)
+
+  long_list <- lapply(seq_len(nrow(x)), function(i) {
+    ct <- as.character(x[i, celltype_col])
+    syms <- unlist(x[i, gene_cols], use.names = FALSE)
+    syms <- unique(trimws(as.character(syms)))
+    syms <- syms[nzchar(syms)]
+    if (length(syms) == 0) return(NULL)
+    data.frame(SYMBOL = syms, xCell_cell_type = ct, stringsAsFactors = FALSE)
+  })
+
+  long <- do.call(rbind, long_list)
+  if (is.null(long) || nrow(long) == 0) stop("Parsed xCell table but found 0 gene symbols. Check file contents.")
+
+  # collapse SYMBOL -> "ct1;ct2;..."
+  agg <- aggregate(xCell_cell_type ~ SYMBOL, data = long, FUN = function(v) {
+    paste(sort(unique(v)), collapse = ";")
+  })
+
+  cat("xCell map built. Unique SYMBOLs:", nrow(agg), "\n")
+  agg
+}
+
+############################################################
+# 2) Annotate an LRT hallmark CSV
+############################################################
+annotate_lrt_with_xcell <- function(lrt_csv, xcell_map, out_csv) {
+  df <- read.csv(lrt_csv, stringsAsFactors = FALSE, check.names = FALSE)
+  if (!("SYMBOL" %in% colnames(df))) stop("Your LRT CSV must have a SYMBOL column: ", lrt_csv)
+
+  df2 <- merge(df, xcell_map, by = "SYMBOL", all.x = TRUE)
+
+  # put xCell_cell_type after ENSG if present
+  if ("ENSG" %in% colnames(df2)) {
+    cols <- colnames(df2)
+    cols <- cols[cols != "xCell_cell_type"]
+    ensg_i <- match("ENSG", cols)
+    new_order <- append(cols, "xCell_cell_type", after = ensg_i)
+    df2 <- df2[, new_order]
+  }
+
+  write.csv(df2, out_csv, row.names = FALSE)
+  cat("Wrote:", out_csv, "\n")
+  invisible(df2)
+}
+
+############################################################
+# RUN
+############################################################
+xcell_map <- build_xcell_symbol_map(xcell_file)
+
+out_all <- file.path(out_dir, "HALLMARK_all_geneLevel_LRTclusters_ALLDAYS_sig_xCellAnnotated.csv")
+out_13  <- file.path(out_dir, "HALLMARK_all_geneLevel_LRTclusters_Day1-3_sig_xCellAnnotated.csv")
+
+annotate_lrt_with_xcell(lrt_all_days_csv, xcell_map, out_all)
+annotate_lrt_with_xcell(lrt_day13_csv,    xcell_map, out_13)
+
+
+```
+
+```{r}
+# 3.11.26 
+
+############################################################
+# FLIPPED ORDER:
+# 1) LRT cluster genes
+# 2) filter to xCell genes first
+# 3) then map those xCell-filtered genes to Hallmark pathways
+############################################################
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# ---------- PATHS ----------
+xcell_file <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/xcell_results/xCell_cell_to_genes_supp.csv"
+tsv_dir    <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes"
+
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+out_csv <- file.path(out_dir, "xCellFirst_HALLMARK_all_geneLevel_LRTclusters.csv")
+
+############################################################
+# 1) Build SYMBOL -> xCell_cell_type map (same robust reader)
+############################################################
+build_xcell_symbol_map <- function(xcell_path) {
+
+  x <- tryCatch(
+    read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e) NULL
+  )
+
+  if (is.null(x) || ncol(x) < 2) {
+    x <- tryCatch(
+      read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE, sep = ";"),
+      error = function(e) NULL
+    )
+  }
+
+  if (is.null(x) || ncol(x) < 2) {
+    lines <- readLines(xcell_path, warn = FALSE)
+    lines <- lines[nzchar(trimws(lines))]
+    if (length(lines) < 2) stop("xCell file looks empty or unreadable: ", xcell_path)
+
+    header <- lines[1]
+    delim <- if (grepl(";", header, fixed = TRUE)) ";" else ","
+
+    parts <- strsplit(lines, delim, fixed = TRUE)
+    max_len <- max(lengths(parts))
+    mat <- t(vapply(parts, function(p) { length(p) <- max_len; p }, character(max_len)))
+
+    x <- as.data.frame(mat, stringsAsFactors = FALSE, check.names = FALSE)
+    colnames(x) <- x[1, ]
+    x <- x[-1, , drop = FALSE]
+  }
+
+  if (ncol(x) < 2) stop("Could not read xCell file into >=2 columns. Check delimiter/format.")
+
+  celltype_col <- colnames(x)[1]
+  second_col_numeric <- suppressWarnings(all(is.na(x[[2]]) | !is.na(as.numeric(as.character(x[[2]])))))
+  gene_cols <- if (second_col_numeric) 3:ncol(x) else 2:ncol(x)
+
+  long_list <- lapply(seq_len(nrow(x)), function(i) {
+    ct <- as.character(x[i, celltype_col])
+    syms <- unlist(x[i, gene_cols], use.names = FALSE)
+    syms <- unique(trimws(as.character(syms)))
+    syms <- syms[nzchar(syms)]
+    if (length(syms) == 0) return(NULL)
+    data.frame(SYMBOL = syms, xCell_cell_type = ct, stringsAsFactors = FALSE)
+  })
+
+  long <- do.call(rbind, long_list)
+  if (is.null(long) || nrow(long) == 0) stop("Parsed xCell table but found 0 gene symbols. Check file contents.")
+
+  agg <- aggregate(xCell_cell_type ~ SYMBOL, data = long, FUN = function(v) {
+    paste(sort(unique(v)), collapse = ";")
+  })
+
+  cat("xCell map built. Unique SYMBOLs:", nrow(agg), "\n")
+  agg
+}
+
+############################################################
+# 2) Read MSigDB Hallmark TSV symbols
+############################################################
+read_msigdb_tsv_symbols <- function(tsv_path) {
+  lines <- readLines(tsv_path, warn = FALSE)
+
+  gs_line <- grep("^GENE_SYMBOLS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) gs_line <- grep("^SOURCE_MEMBERS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) return(character(0))
+
+  val <- sub("^[^\t]*\t", "", gs_line[1])
+  syms <- unlist(strsplit(val, ",", fixed = TRUE), use.names = FALSE)
+  syms <- unique(trimws(syms))
+  syms[nzchar(syms)]
+}
+
+############################################################
+# 3) Build base LRT cluster table with SYMBOL
+############################################################
+build_lrt_cluster_table <- function(clusters_obj, resLRT_obj) {
+
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes", "cluster") %in% colnames(df_map)))
+
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  # ENSG -> SYMBOL
+  sym_map <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys     = unique(df_map$ENSG),
+    columns  = c("ENSEMBL", "SYMBOL"),
+    keytype  = "ENSEMBL"
+  )
+
+  sym_map <- sym_map[!is.na(sym_map$ENSEMBL) & !is.na(sym_map$SYMBOL), ]
+  sym_map <- unique(sym_map)
+  colnames(sym_map)[colnames(sym_map) == "ENSEMBL"] <- "ENSG"
+
+  base <- merge(df_map[, c("genes", "ENSG", "cluster")], sym_map, by = "ENSG")
+  base <- merge(base, lrt_df[, c("ENSG", "pvalue", "padj")], by = "ENSG", all.x = TRUE)
+
+  base <- unique(base[, c("SYMBOL", "ENSG", "genes", "cluster", "pvalue", "padj")])
+  base[order(base$cluster, base$pvalue), ]
+}
+
+############################################################
+# 4) Filter LRT genes to xCell FIRST
+############################################################
+filter_lrt_to_xcell <- function(lrt_table, xcell_map) {
+  out <- merge(lrt_table, xcell_map, by = "SYMBOL")
+  out <- unique(out[, c("SYMBOL", "ENSG", "genes", "cluster", "pvalue", "padj", "xCell_cell_type")])
+
+  cat("LRT genes before xCell filter:", nrow(lrt_table), "\n")
+  cat("LRT genes after xCell filter:", nrow(out), "\n")
+  cat("Unique SYMBOLs after xCell filter:", length(unique(out$SYMBOL)), "\n")
+
+  out[order(out$cluster, out$pvalue), ]
+}
+
+############################################################
+# 5) For each Hallmark set, keep ONLY xCell-filtered LRT genes
+############################################################
+map_xcell_filtered_lrt_to_hallmark <- function(xcell_lrt_table, tsv_dir, pattern="\\.tsv$") {
+
+  files <- list.files(tsv_dir, pattern = pattern, full.names = TRUE)
+  stopifnot(length(files) > 0)
+
+  all_hits <- list()
+
+  for (f in files) {
+    set_name <- tools::file_path_sans_ext(basename(f))
+    hallmark_syms <- read_msigdb_tsv_symbols(f)
+
+    cat("\n---", set_name, "---\n")
+    cat("Hallmark input symbols:", length(hallmark_syms), "\n")
+
+    hit <- xcell_lrt_table[xcell_lrt_table$SYMBOL %in% hallmark_syms, , drop = FALSE]
+
+    if (nrow(hit) > 0) {
+      hit$geneset <- set_name
+      hit <- hit[, c("geneset", "SYMBOL", "ENSG", "genes", "cluster", "pvalue", "padj", "xCell_cell_type")]
+
+      cat("Mapped rows:", nrow(hit), "\n")
+      cat("Unique SYMBOLs mapped:", length(unique(hit$SYMBOL)), "\n")
+
+      all_hits[[set_name]] <- hit
+    } else {
+      cat("Mapped rows: 0\n")
+    }
+  }
+
+  out <- if (length(all_hits) > 0) do.call(rbind, all_hits) else data.frame()
+  out[order(out$geneset, out$cluster, out$pvalue), ]
+}
+
+############################################################
+# RUN
+############################################################
+xcell_map  <- build_xcell_symbol_map(xcell_file)
+lrt_table  <- build_lrt_cluster_table(clusters_obj = clusters_anyday, resLRT_obj = resLRT_anyday)
+xcell_lrt  <- filter_lrt_to_xcell(lrt_table, xcell_map)
+
+final_hits <- map_xcell_filtered_lrt_to_hallmark(
+  xcell_lrt_table = xcell_lrt,
+  tsv_dir         = tsv_dir
+)
+
+write.csv(final_hits, out_csv, row.names = FALSE)
+cat("\nWrote combined xCell-first Hallmark mappings to:\n", out_csv, "\n")
+
+
+
+```
+
+```{r}
+# 3.11.26 
+
+############################################################
+# DAYS 1-9 (ANYDAY): HALLMARK FIRST -> then xCell
+############################################################
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+# ---------- PATHS ----------
+xcell_file <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/xcell_results/xCell_cell_to_genes_supp.csv"
+tsv_dir    <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes"
+
+out_dir <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/GSEA_Hallmark_Genes/DESeq2_LRT_Cluster_Results"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+out_hallmark_first_csv <- file.path(out_dir, "HALLMARKFirst_xCell_anyday.csv")
+
+############################################################
+# 1) Build SYMBOL -> xCell_cell_type map
+############################################################
+build_xcell_symbol_map <- function(xcell_path) {
+
+  x <- tryCatch(
+    read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE),
+    error = function(e) NULL
+  )
+
+  if (is.null(x) || ncol(x) < 2) {
+    x <- tryCatch(
+      read.csv(xcell_path, stringsAsFactors = FALSE, check.names = FALSE, sep = ";"),
+      error = function(e) NULL
+    )
+  }
+
+  if (is.null(x) || ncol(x) < 2) {
+    lines <- readLines(xcell_path, warn = FALSE)
+    lines <- lines[nzchar(trimws(lines))]
+    if (length(lines) < 2) stop("xCell file looks empty or unreadable: ", xcell_path)
+
+    header <- lines[1]
+    delim <- if (grepl(";", header, fixed = TRUE)) ";" else ","
+
+    parts <- strsplit(lines, delim, fixed = TRUE)
+    max_len <- max(lengths(parts))
+    mat <- t(vapply(parts, function(p) { length(p) <- max_len; p }, character(max_len)))
+
+    x <- as.data.frame(mat, stringsAsFactors = FALSE, check.names = FALSE)
+    colnames(x) <- x[1, ]
+    x <- x[-1, , drop = FALSE]
+  }
+
+  if (ncol(x) < 2) stop("Could not read xCell file into >=2 columns. Check delimiter/format.")
+
+  celltype_col <- colnames(x)[1]
+  second_col_numeric <- suppressWarnings(all(is.na(x[[2]]) | !is.na(as.numeric(as.character(x[[2]])))))
+  gene_cols <- if (second_col_numeric) 3:ncol(x) else 2:ncol(x)
+
+  long_list <- lapply(seq_len(nrow(x)), function(i) {
+    ct <- as.character(x[i, celltype_col])
+    syms <- unlist(x[i, gene_cols], use.names = FALSE)
+    syms <- unique(trimws(as.character(syms)))
+    syms <- syms[nzchar(syms)]
+    if (length(syms) == 0) return(NULL)
+    data.frame(SYMBOL = syms, xCell_cell_type = ct, stringsAsFactors = FALSE)
+  })
+
+  long <- do.call(rbind, long_list)
+  if (is.null(long) || nrow(long) == 0) stop("Parsed xCell table but found 0 gene symbols.")
+
+  agg <- aggregate(xCell_cell_type ~ SYMBOL, data = long, FUN = function(v) {
+    paste(sort(unique(v)), collapse = ";")
+  })
+
+  cat("xCell map built. Unique SYMBOLs:", nrow(agg), "\n")
+  agg
+}
+
+############################################################
+# 2) Read MSigDB TSV symbols
+############################################################
+read_msigdb_tsv_symbols <- function(tsv_path) {
+  lines <- readLines(tsv_path, warn = FALSE)
+
+  gs_line <- grep("^GENE_SYMBOLS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) gs_line <- grep("^SOURCE_MEMBERS\\t", lines, value = TRUE)
+  if (length(gs_line) == 0) return(character(0))
+
+  val <- sub("^[^\t]*\t", "", gs_line[1])
+  syms <- unlist(strsplit(val, ",", fixed = TRUE), use.names = FALSE)
+  syms <- unique(trimws(syms))
+  syms[nzchar(syms)]
+}
+
+############################################################
+# 3) Hallmark-first mapping to LRT clusters
+############################################################
+map_symbols_to_clusters <- function(symbols, set_name, clusters_obj, resLRT_obj) {
+
+  symbols <- unique(trimws(as.character(symbols)))
+  symbols <- symbols[nzchar(symbols)]
+  if (length(symbols) == 0) return(data.frame())
+
+  df_map <- clusters_obj$df
+  stopifnot(all(c("genes","cluster") %in% colnames(df_map)))
+  df_map$ENSG <- sub("\\..*$", "", df_map$genes)
+
+  lrt_df <- as.data.frame(resLRT_obj)
+  lrt_df$ENSG <- sub("\\..*$", "", rownames(lrt_df))
+
+  m <- AnnotationDbi::select(
+    org.Hs.eg.db,
+    keys     = symbols,
+    columns  = c("SYMBOL","ENSEMBL"),
+    keytype  = "SYMBOL"
+  )
+  m <- m[!is.na(m$SYMBOL) & !is.na(m$ENSEMBL), c("SYMBOL","ENSEMBL")]
+  m <- unique(m)
+  colnames(m)[colnames(m) == "ENSEMBL"] <- "ENSG"
+  if (nrow(m) == 0) return(data.frame())
+
+  hit <- merge(m, df_map[, c("genes","ENSG","cluster")], by = "ENSG")
+  if (nrow(hit) == 0) return(data.frame())
+
+  hit2 <- merge(hit, lrt_df[, c("ENSG","pvalue","padj")], by = "ENSG", all.x = TRUE)
+
+  hit2$geneset <- set_name
+  hit2 <- hit2[, c("geneset","SYMBOL","ENSG","genes","cluster","pvalue","padj")]
+  hit2[order(hit2$geneset, hit2$cluster, hit2$pvalue), ]
+}
+
+############################################################
+# 4) Run all Hallmark TSVs against Days 1-9 LRT clusters
+############################################################
+run_all_msigdb_tsvs_to_clusters <- function(tsv_dir, clusters_obj, resLRT_obj, pattern="\\.tsv$") {
+
+  files <- list.files(tsv_dir, pattern = pattern, full.names = TRUE)
+  stopifnot(length(files) > 0)
+
+  all_hits <- list()
+
+  for (f in files) {
+    set_name <- tools::file_path_sans_ext(basename(f))
+    symbols  <- read_msigdb_tsv_symbols(f)
+
+    cat("\n---", set_name, "---\n")
+    cat("Input symbols:", length(symbols), "\n")
+
+    hit2 <- map_symbols_to_clusters(symbols, set_name, clusters_obj, resLRT_obj)
+
+    cat("Mapped rows:", nrow(hit2), "\n")
+    if (nrow(hit2) > 0) {
+      all_hits[[set_name]] <- hit2
+    }
+  }
+
+  out <- if (length(all_hits) > 0) do.call(rbind, all_hits) else data.frame()
+  out
+}
+
+############################################################
+# 5) Annotate/filter Hallmark-first result with xCell
+############################################################
+annotate_with_xcell <- function(df, xcell_map) {
+  out <- merge(df, xcell_map, by = "SYMBOL", all.x = TRUE)
+  out[order(out$geneset, out$cluster, out$pvalue), ]
+}
+
+filter_hallmark_to_xcell <- function(df_annotated) {
+  df_annotated[!is.na(df_annotated$xCell_cell_type) & nzchar(df_annotated$xCell_cell_type), ]
+}
+
+############################################################
+# RUN: DAYS 1-9 / ANYDAY
+############################################################
+xcell_map <- build_xcell_symbol_map(xcell_file)
+
+hallmark_first_anyday <- run_all_msigdb_tsvs_to_clusters(
+  tsv_dir      = tsv_dir,
+  clusters_obj = clusters_anyday,
+  resLRT_obj   = resLRT_anyday
+)
+
+hallmark_first_anyday_annot <- annotate_with_xcell(hallmark_first_anyday, xcell_map)
+hallmark_first_anyday_xcell <- filter_hallmark_to_xcell(hallmark_first_anyday_annot)
+
+write.csv(hallmark_first_anyday_xcell, out_hallmark_first_csv, row.names = FALSE)
+cat("\nWrote Days 1-9 Hallmark-first -> xCell CSV to:\n", out_hallmark_first_csv, "\n")
+
+
+```
+
+```{r}
+#converting xCell output to figure 
+library(tidyverse)
+
+# read xCell output
+xcell <- read.csv("/Users/chhugani/Downloads/xcell_results 3/xCell_TPM_matrix_xCell_3.27.26_HGNC_xCell_2243032726_RAW.csv", row.names = 1, check.names = FALSE)
+
+xcell_t$Sample <- rownames(xcell_t)
+
+# change periods to hyphens
+xcell_t$Sample <- gsub("\\.", "-", xcell_t$Sample)
+
+# add .bam
+xcell_t$Sample <- paste0(xcell_t$Sample, ".bam")
+
+
+
+
+# merge with metadata
+meta <- coldata_lrt_1to7   # your metadata
+meta$Sample <- rownames(meta)
+
+df <- merge(xcell_t, meta, by = "Sample")
+dim(df)
+head(df[, 1:10])
+
+```
+```{r}
+
+cells <- c("Neutrophils", "Monocytes", "B-cells", "CD4+ T-cells", "CD8+ T-cells", "NK cells", "DC", "Macrophages M1", "Macrophages M2")
+
+library(tidyverse)
+
+df_long <- df %>%
+  select(Sample, Status, Day, all_of(cells)) %>%
+  pivot_longer(
+    cols = all_of(cells),
+    names_to = "CellType",
+    values_to = "Score"
+  )
+
+dim(df_long)
+head(df_long)
+
+```
+
+```{r}
+ggplot(df_long, aes(x = Status, y = Score, fill = Status)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 0.8, alpha = 0.7) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 3) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Immune Cell Composition Differences (xCell)",
+    x = "",
+    y = "xCell Enrichment Score"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+```{r}
+df_stats <- df_long %>%
+  group_by(CellType) %>%
+  summarise(
+    p_value = wilcox.test(Score ~ Status)$p.value
+  ) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH"))
+```
+
+```{r}
+ggplot(df_long, aes(x = Status, y = Score, fill = Status)) +
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.08, size = 0.8, alpha = 0.7) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 3) +
+  stat_compare_means(
+    method = "wilcox.test",
+    label = "p.format",
+    size = 3,
+    vjust = -0.3
+  ) +
+  scale_x_discrete(expand = expansion(add = 0.4)) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.18))) +
+  theme_classic(base_size = 14) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+
+```
+
+```{r}
+library(tidyverse)
+
+cells_traj <- c("Neutrophils", "Monocytes", "B-cells", "CD4+ T-cells", "CD8+ T-cells", "NK cells", "DC", "Macrophages M1", "Macrophages M2")
+
+df_long_traj <- df %>%
+  select(Sample, Status, Day, all_of(cells_traj)) %>%
+  mutate(Day = as.numeric(as.character(Day))) %>%
+  pivot_longer(
+    cols = all_of(cells_traj),
+    names_to = "CellType",
+    values_to = "Score"
+  )
+
+ggplot(df_long_traj, aes(x = Day, y = Score, color = Status)) +
+  geom_point(alpha = 0.5, size = 1.2,
+             position = position_jitter(width = 0.12, height = 0)) +
+  stat_summary(
+    fun = mean,
+    geom = "line",
+    aes(group = Status),
+    linewidth = 1.2
+  ) +
+  stat_summary(
+    fun.data = mean_se,
+    geom = "errorbar",
+    aes(group = Status),
+    width = 0.15,
+    linewidth = 0.5
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    aes(group = Status),
+    size = 2
+  ) +
+  facet_wrap(~ CellType, scales = "free_y", ncol = 3) +
+  scale_x_continuous(breaks = c(1, 3, 5, 7)) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Temporal Dynamics of Immune Cell Composition (xCell)",
+    x = "Day",
+    y = "xCell Enrichment Score"
+  ) +
+  theme(
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+```
+
+
+```{r}
+############################################################
+# Cleaner faceted boxplots of immune cell fractions by Status
+############################################################
+
+library(tidyverse)
+library(ggpubr)
+
+# -------------------------
+# 1) Read merged data
+# -------------------------
+merged <- read.csv("/Users/chhugani/Downloads/CIBERSORTx_merged_with_metadata.csv", check.names = FALSE)
+
+# -------------------------
+# 2) Format metadata
+# -------------------------
+merged$Status <- factor(merged$Status, levels = c("Persistent", "Resolving"))
+
+# -------------------------
+# 3) Define metadata / non-cell-type columns
+#    Add/remove names here depending on your file
+# -------------------------
+non_cell_cols <- c(
+  "Sample",
+  "Status",
+  "Day",
+  "Subject",
+  "Age",
+  "Sex",
+  "Batch",
+  "Platform",
+  "P-value",
+  "Correlation",
+  "RMSE"
+)
+
+# Keep only columns that:
+# 1) are NOT metadata/QC
+# 2) are numeric
+cell_types <- setdiff(colnames(merged), non_cell_cols)
+cell_types <- cell_types[sapply(merged[cell_types], is.numeric)]
+
+cat("Number of cell types tested:", length(cell_types), "\n")
+cat("Cell types being tested:\n")
+print(cell_types)
+
+# -------------------------
+# 4) Pivot to long format
+# -------------------------
+long_df <- merged %>%
+  select(all_of(c("Sample", "Status", cell_types))) %>%
+  pivot_longer(
+    cols = all_of(cell_types),
+    names_to = "CellType",
+    values_to = "Score"
+  )
+
+# -------------------------
+# 5) Run Wilcoxon test for each cell type
+# -------------------------
+wilcox_results <- long_df %>%
+  group_by(CellType) %>%
+  summarise(
+    n_persistent = sum(Status == "Persistent" & !is.na(Score)),
+    n_resolving  = sum(Status == "Resolving" & !is.na(Score)),
+    median_persistent = median(Score[Status == "Persistent"], na.rm = TRUE),
+    median_resolving  = median(Score[Status == "Resolving"], na.rm = TRUE),
+    p_value = wilcox.test(Score ~ Status)$p.value,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    significant = p_adj < 0.05,
+    direction = case_when(
+      median_persistent > median_resolving ~ "Higher in Persistent",
+      median_persistent < median_resolving ~ "Higher in Resolving",
+      TRUE ~ "No change"
+    )
+  ) %>%
+  arrange(p_adj)
+
+# -------------------------
+# 6) Save full results
+# -------------------------
+write.csv(
+  wilcox_results,
+  "CIBERSORTx_wilcox_results_FDR.csv",
+  row.names = FALSE
+)
+
+# -------------------------
+# 7) Save significant-only results
+# -------------------------
+sig_results <- wilcox_results %>%
+  filter(significant)
+
+write.csv(
+  sig_results,
+  "CIBERSORTx_wilcox_results_FDR_significant_only.csv",
+  row.names = FALSE
+)
+
+# -------------------------
+# 8) Print results
+# -------------------------
+cat("\nFull Wilcoxon + FDR results:\n")
+print(wilcox_results)
+
+cat("\nSignificant cell types after BH/FDR:\n")
+print(sig_results)
+
+# -------------------------
+# 9) Optional: preview top hits
+# -------------------------
+wilcox_results %>%
+  select(CellType, median_persistent, median_resolving, p_value, p_adj, direction, significant) %>%
+  print(n = Inf)
+```

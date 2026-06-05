@@ -1,0 +1,890 @@
+---
+title: "cDC extended analysis KC"
+output: html_document
+date: "2026-05-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars}
+
+#correlation analysis 
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Read CSV file
+df <- read_csv("/Users/chhugani/Downloads/SAB_Serum_WBC_Dogra.csv")
+
+# Keep Day 1 samples only
+day1_df <- df %>%
+  filter(Day == 1) %>%
+  select(
+    `Study ID`,
+    Age,
+    TTP,
+    `Platelet...16`,
+    `cDC (from raw xCell)`
+  ) %>%
+  mutate(
+    across(
+      c(Age, TTP, `Platelet...16`, `cDC (from raw xCell)`),
+      as.numeric
+    )
+  )
+
+# Variables to correlate with Day 1 cDC
+clinical_vars <- c("Age", "TTP", "Platelet...16")
+
+# Function to run Spearman correlations
+run_spearman <- function(var_name) {
+
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.))
+
+  test <- cor.test(
+    temp_df$`cDC (from raw xCell)`,
+    temp_df[[var_name]],
+    method = "spearman",
+    exact = FALSE
+  )
+
+  tibble(
+    variable = var_name,
+    n = nrow(temp_df),
+    spearman_rho = unname(test$estimate),
+    p_value = test$p.value
+  )
+}
+
+# Run correlations
+correlation_results <- map_dfr(clinical_vars, run_spearman) %>%
+  mutate(
+    fdr_bh = p.adjust(p_value, method = "BH")
+  )
+
+# View results
+print(correlation_results)
+
+# Save results
+write_csv(
+  correlation_results,
+  "/Users/chhugani/Downloads/day1_cdc_clinical_correlations.csv"
+)
+```
+```{r}
+#creating figures 
+
+library(ggplot2)
+library(patchwork)
+
+base_theme <- theme_classic(base_size = 18) +
+  theme(
+    plot.title = element_text(size = 28, face = "bold"),
+    axis.title = element_text(size = 22),
+    axis.text = element_text(size = 16),
+    plot.margin = margin(25, 25, 25, 25)
+  )
+
+# Plot 1: Age
+p1 <- ggplot(day1_df, aes(x = Age, y = `cDC (from raw xCell)`)) +
+  geom_point(size = 4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 1.5) +
+  annotate(
+    "text",
+    x = 35,
+    y = 1490,
+    label = "Spearman rho = 0.52\np = 0.017",
+    hjust = 0,
+    size = 6
+  ) +
+  coord_cartesian(ylim = c(500, 1500)) +
+  labs(
+    title = "Age",
+    x = "Age",
+    y = "Day 1 cDC score"
+  ) +
+  base_theme
+
+# Plot 2: TTP
+p2 <- ggplot(day1_df, aes(x = TTP, y = `cDC (from raw xCell)`)) +
+  geom_point(size = 4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 1.5) +
+  annotate(
+    "text",
+    x = 5,
+    y = 1490,
+    label = "Spearman rho = 0.48\np = 0.029",
+    hjust = 0,
+    size = 6
+  ) +
+  coord_cartesian(ylim = c(500, 1500)) +
+  labs(
+    title = "TTP",
+    x = "Time to positivity (TTP)",
+    y = "Day 1 cDC score"
+  ) +
+  base_theme
+
+# Plot 3: Platelet
+p3 <- ggplot(day1_df, aes(x = `Platelet...16`, y = `cDC (from raw xCell)`)) +
+  geom_point(size = 4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 1.5) +
+  annotate(
+    "text",
+    x = 40,
+    y = 1490,
+    label = "Spearman rho = 0.26\np = 0.268",
+    hjust = 0,
+    size = 6
+  ) +
+  coord_cartesian(ylim = c(500, 1500)) +
+  labs(
+    title = "Platelet",
+    x = "Platelet count",
+    y = "Day 1 cDC score"
+  ) +
+  base_theme
+
+# Combine plots
+combined_plot <- p1 + p2 + p3 +
+  plot_layout(guides = "collect")
+
+# Display figure
+combined_plot
+
+# Save figure
+ggsave(
+  "/Users/chhugani/Downloads/Day1_cDC_correlations_clean.png",
+  combined_plot,
+  width = 18,
+  height = 7,
+  dpi = 300
+)
+
+```
+
+```{r}
+#comparison of categorical variables 
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Read data
+df <- read_csv("/Users/chhugani/Downloads/SAB_Serum_WBC_Dogra.csv")
+
+# Keep Day 1 samples only
+day1_df <- df %>%
+  filter(Day == 1) %>%
+  mutate(
+    `cDC (from raw xCell)` = as.numeric(`cDC (from raw xCell)`)
+  )
+
+# Categorical variables to test
+categorical_vars <- c(
+  "initial_abx_group",
+  "source_risk_group",
+  "admitting_dx_group",
+  "diabetes",
+  "renal_disease",
+  "cardiovascular_disease",
+  "heme_onc",
+  "obesity",
+  "pulmonary_disease"
+)
+
+# Function for categorical comparisons
+run_categorical_test <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.)) %>%
+    filter(.data[[var_name]] != "")
+  
+  n_groups <- length(unique(temp_df[[var_name]]))
+  
+  if (n_groups < 2) {
+    return(tibble(
+      variable = var_name,
+      n = nrow(temp_df),
+      groups = n_groups,
+      test = NA_character_,
+      p_value = NA_real_
+    ))
+  }
+  
+  if (n_groups == 2) {
+    test_result <- wilcox.test(
+      temp_df$`cDC (from raw xCell)` ~ temp_df[[var_name]],
+      exact = FALSE
+    )
+    test_name <- "Wilcoxon rank-sum"
+  } else {
+    test_result <- kruskal.test(
+      temp_df$`cDC (from raw xCell)` ~ temp_df[[var_name]]
+    )
+    test_name <- "Kruskal-Wallis"
+  }
+  
+  tibble(
+    variable = var_name,
+    n = nrow(temp_df),
+    groups = n_groups,
+    test = test_name,
+    p_value = test_result$p.value
+  )
+}
+
+# Run tests
+categorical_results <- map_dfr(categorical_vars, run_categorical_test) %>%
+  mutate(
+    fdr_bh = p.adjust(p_value, method = "BH")
+  )
+
+# View results
+print(categorical_results)
+
+# Save results
+write_csv(
+  categorical_results,
+  "/Users/chhugani/Downloads/day1_cdc_categorical_comparisons.csv"
+)
+
+
+
+
+
+
+
+
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(patchwork)
+
+# Variables to plot
+categorical_vars <- c(
+  "initial_abx_group",
+  "source_risk_group",
+  "admitting_dx_group",
+  "diabetes",
+  "renal_disease",
+  "cardiovascular_disease",
+  "heme_onc",
+  "obesity",
+  "pulmonary_disease"
+)
+
+# Function to make one plot per categorical variable
+make_categorical_plot <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.)) %>%
+    filter(.data[[var_name]] != "")
+  
+  result_row <- categorical_results %>%
+    filter(variable == var_name)
+  
+  test_label <- ifelse(
+    is.na(result_row$test),
+    "Not tested",
+    paste0(result_row$test, "\np = ", signif(result_row$p_value, 3))
+  )
+  
+  ggplot(
+    temp_df,
+    aes(
+      x = .data[[var_name]],
+      y = `cDC (from raw xCell)`
+    )
+  ) +
+    geom_boxplot(outlier.shape = NA, width = 0.6) +
+    geom_jitter(width = 0.12, size = 3, alpha = 0.85) +
+    annotate(
+      "text",
+      x = Inf,
+      y = Inf,
+      label = test_label,
+      hjust = 1.05,
+      vjust = 1.3,
+      size = 4.5
+    ) +
+    coord_cartesian(ylim = c(500, 1500), clip = "off") +
+    labs(
+      title = var_name,
+      x = "",
+      y = "Day 1 cDC score"
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      axis.text.x = element_text(angle = 30, hjust = 1),
+      plot.margin = margin(20, 20, 20, 20)
+    )
+}
+
+# Generate plots
+categorical_plots <- map(categorical_vars, make_categorical_plot)
+
+# Combine plots into panel
+combined_categorical_plot <- wrap_plots(categorical_plots, ncol = 3)
+
+combined_categorical_plot
+
+combined_categorical_plot <- wrap_plots(categorical_plots, ncol = 3)
+
+ggsave(
+  "/Users/chhugani/Downloads/Day1_cDC_categorical_comparisons_updated_9.png",
+  combined_categorical_plot,
+  width = 24,
+  height = 20,
+  dpi = 300
+)
+
+```
+
+```{r}
+#extended analysis: glucose on day 1 
+#continuous
+
+# Correlation analysis: Day 1 cDC vs continuous clinical variables
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Read CSV file
+df <- read_csv("/Users/chhugani/Downloads/SAB_Serum_WBC_Dogra.csv")
+
+# Keep Day 1 samples only
+day1_df <- df %>%
+  filter(Day == 1) %>%
+  select(
+    `Study ID`,
+    Age,
+    TTP,
+    `Platelet...16`,
+    Glucose,
+    `cDC (from raw xCell)`
+  ) %>%
+  mutate(
+    across(
+      c(Age, TTP, `Platelet...16`, Glucose, `cDC (from raw xCell)`),
+      as.numeric
+    )
+  )
+
+# Variables to correlate with Day 1 cDC
+clinical_vars <- c("Age", "TTP", "Platelet...16", "Glucose")
+
+# Function to run Spearman correlations
+run_spearman <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.))
+  
+  test <- cor.test(
+    temp_df$`cDC (from raw xCell)`,
+    temp_df[[var_name]],
+    method = "spearman",
+    exact = FALSE
+  )
+  
+  tibble(
+    variable = var_name,
+    n = nrow(temp_df),
+    spearman_rho = unname(test$estimate),
+    p_value = test$p.value
+  )
+}
+
+# Run correlations
+correlation_results <- map_dfr(clinical_vars, run_spearman) %>%
+  mutate(
+    fdr_bh = p.adjust(p_value, method = "BH")
+  )
+
+# View results
+print(correlation_results)
+
+# Save results
+write_csv(
+  correlation_results,
+  "/Users/chhugani/Downloads/day1_cdc_clinical_correlations_with_glucose.csv"
+)
+
+
+
+```
+
+```{r}
+#extended analysis -Day 1 cDC categorical clinical comparisons
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+library(ggplot2)
+library(patchwork)
+
+# Read CSV
+df <- read_csv("/Users/chhugani/Downloads/SAB_Serum_WBC_Dogra.csv")
+
+# Keep Day 1 samples only
+day1_df <- df %>%
+  filter(Day == 1) %>%
+  mutate(
+    `cDC (from raw xCell)` = as.numeric(`cDC (from raw xCell)`),
+    Glucose = as.numeric(Glucose)
+  )
+
+# Create glucose categorical variable
+day1_df <- day1_df %>%
+  mutate(
+    glucose_group = ifelse(
+      Glucose > 150,
+      ">150",
+      "<=150"
+    )
+  )
+
+# Categorical variables to test
+categorical_vars <- c(
+  "Platelet_onset",
+  "Severity of Sepsis",
+  "ICU adm within 48h diagnosis",
+  "glucose_group"
+)
+
+# Function for categorical comparisons
+run_categorical_test <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.)) %>%
+    filter(.data[[var_name]] != "") %>%
+    filter(.data[[var_name]] != "N/A")
+  
+  n_groups <- length(unique(temp_df[[var_name]]))
+  
+  if (n_groups < 2) {
+    return(tibble(
+      variable = var_name,
+      n = nrow(temp_df),
+      groups = n_groups,
+      test = NA_character_,
+      p_value = NA_real_
+    ))
+  }
+  
+  if (n_groups == 2) {
+    
+    test_result <- wilcox.test(
+      temp_df$`cDC (from raw xCell)` ~ temp_df[[var_name]],
+      exact = FALSE
+    )
+    
+    test_name <- "Wilcoxon rank-sum"
+    
+  } else {
+    
+    test_result <- kruskal.test(
+      temp_df$`cDC (from raw xCell)` ~ temp_df[[var_name]]
+    )
+    
+    test_name <- "Kruskal-Wallis"
+  }
+  
+  tibble(
+    variable = var_name,
+    n = nrow(temp_df),
+    groups = n_groups,
+    test = test_name,
+    p_value = test_result$p.value
+  )
+}
+
+# Run tests
+categorical_results <- map_dfr(categorical_vars, run_categorical_test) %>%
+  mutate(
+    fdr_bh = p.adjust(p_value, method = "BH")
+  )
+
+# View results
+print(categorical_results)
+
+# Save results
+write_csv(
+  categorical_results,
+  "/Users/chhugani/Downloads/day1_cdc_updated_categorical_comparisons.csv"
+)
+
+# -----------------------------
+# Create plots
+# -----------------------------
+
+make_categorical_plot <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.)) %>%
+    filter(.data[[var_name]] != "") %>%
+    filter(.data[[var_name]] != "N/A")
+  
+  result_row <- categorical_results %>%
+    filter(variable == var_name)
+  
+  test_label <- ifelse(
+    is.na(result_row$test),
+    "Not tested",
+    paste0(
+      result_row$test,
+      "\np = ",
+      signif(result_row$p_value, 3)
+    )
+  )
+  
+  ggplot(
+    temp_df,
+    aes(
+      x = .data[[var_name]],
+      y = `cDC (from raw xCell)`
+    )
+  ) +
+    geom_boxplot(
+      outlier.shape = NA,
+      width = 0.6
+    ) +
+    geom_jitter(
+      width = 0.12,
+      size = 3,
+      alpha = 0.85
+    ) +
+    annotate(
+      "text",
+      x = Inf,
+      y = Inf,
+      label = test_label,
+      hjust = 1.05,
+      vjust = 1.3,
+      size = 4.5
+    ) +
+    coord_cartesian(
+      ylim = c(500, 1500),
+      clip = "off"
+    ) +
+    labs(
+      title = var_name,
+      x = "",
+      y = "Day 1 cDC score"
+    ) +
+    theme_classic(base_size = 14) +
+    theme(
+      plot.title = element_text(size = 16, face = "bold"),
+      axis.text.x = element_text(angle = 20, hjust = 1),
+      plot.margin = margin(20, 20, 20, 20)
+    )
+}
+
+# Generate plots
+categorical_plots <- map(categorical_vars, make_categorical_plot)
+
+# Combine plots
+combined_categorical_plot <- wrap_plots(
+  categorical_plots,
+  ncol = 2
+)
+
+# Display figure
+combined_categorical_plot
+
+# Save figure
+ggsave(
+  "/Users/chhugani/Downloads/Day1_cDC_updated_categorical_comparisons.png",
+  combined_categorical_plot,
+  width = 18,
+  height = 14,
+  dpi = 300
+)
+```
+
+```{r}
+# Extended analysis: Day 1 cDC vs clinical variables
+
+library(readr)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+# Read CSV file
+df <- read_csv("/Users/chhugani/Downloads/SAB_Serum_WBC_Dogra.csv")
+
+# Keep Day 1 samples only
+day1_df <- df %>%
+  filter(Day == 1) %>%
+  select(
+    `Study ID`,
+    Age,
+    TTP,
+    WBC,
+    `Platelet...16`,
+    `Neutrophil %`,
+    `lymphocyte %...14`,
+    `monocyte %...15`,
+    `cDC (from raw xCell)`
+  ) %>%
+  mutate(
+    across(
+      c(
+        Age,
+        TTP,
+        WBC,
+        `Platelet...16`,
+        `Neutrophil %`,
+        `lymphocyte %...14`,
+        `monocyte %...15`,
+        `cDC (from raw xCell)`
+      ),
+      as.numeric
+    )
+  )
+
+# Variables to correlate with Day 1 cDC
+clinical_vars <- c(
+  "Age",
+  "TTP",
+  "WBC",
+  "Platelet...16",
+  "Neutrophil %",
+  "lymphocyte %...14",
+  "monocyte %...15"
+)
+
+# Function to run Spearman correlations
+run_spearman <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.))
+  
+  test <- cor.test(
+    temp_df$`cDC (from raw xCell)`,
+    temp_df[[var_name]],
+    method = "spearman",
+    exact = FALSE
+  )
+  
+  tibble(
+    variable = var_name,
+    n = nrow(temp_df),
+    spearman_rho = unname(test$estimate),
+    p_value = test$p.value
+  )
+}
+
+# Run correlations
+correlation_results <- map_dfr(clinical_vars, run_spearman) %>%
+  mutate(
+    fdr_bh = p.adjust(p_value, method = "BH")
+  )
+
+# View results
+print(correlation_results)
+
+# Save results
+write_csv(
+  correlation_results,
+  "/Users/chhugani/Downloads/day1_cdc_clinical_correlations_updated.csv"
+)
+```
+```{r}
+library(ggplot2)
+library(patchwork)
+
+#continuous
+
+# Only include immune cell variables + WBC
+panel_vars <- c(
+  "WBC",
+  "Neutrophil %",
+  "lymphocyte %...14",
+  "monocyte %...15"
+)
+
+# Clean labels
+plot_labels <- c(
+  "WBC" = "WBC",
+  "Neutrophil %" = "Neutrophil %",
+  "lymphocyte %...14" = "Lymphocyte %",
+  "monocyte %...15" = "Monocyte %"
+)
+
+# Function to generate plots
+make_correlation_plot <- function(var_name) {
+  
+  temp_df <- day1_df %>%
+    select(`cDC (from raw xCell)`, all_of(var_name)) %>%
+    filter(complete.cases(.))
+  
+  stats_row <- correlation_results %>%
+    filter(variable == var_name)
+  
+  label_text <- paste0(
+    "rho = ", round(stats_row$spearman_rho, 2),
+    "\nP = ", signif(stats_row$p_value, 2)
+  )
+  
+  ggplot(
+    temp_df,
+    aes(x = .data[[var_name]], y = `cDC (from raw xCell)`)
+  ) +
+    geom_point(size = 2.5, alpha = 0.8) +
+    geom_smooth(method = "lm", se = TRUE) +
+    annotate(
+      "text",
+      x = Inf,
+      y = Inf,
+      label = label_text,
+      hjust = 1.1,
+      vjust = 1.2,
+      size = 4
+    ) +
+    labs(
+      title = plot_labels[[var_name]],
+      x = plot_labels[[var_name]],
+      y = "cDC (raw xCell)"
+    ) +
+    theme_classic(base_size = 13)
+}
+
+# Generate plots
+plot_list <- map(panel_vars, make_correlation_plot)
+
+# Combine into one panel
+combined_plot <- wrap_plots(plot_list, ncol = 2)
+
+# View plot
+combined_plot
+
+# Save figure
+ggsave(
+  "/Users/chhugani/Downloads/day1_cdc_immune_correlations_panel.png",
+  combined_plot,
+  width = 12,
+  height = 10,
+  dpi = 300
+)
+```
+```{r}
+#converting immune cells into categorical 
+
+
+# Create clinically based categorical variables
+
+day1_df <- day1_df %>%
+  mutate(
+    
+    # WBC categories
+    wbc_group = case_when(
+      WBC < 4.5 ~ "Low",
+      WBC >= 4.5 & WBC <= 11 ~ "Normal",
+      WBC > 11 ~ "High"
+    ),
+    
+    # Neutrophil %
+    neutrophil_group = case_when(
+      `Neutrophil %` < 55 ~ "Low",
+      `Neutrophil %` >= 55 & `Neutrophil %` <= 70 ~ "Normal",
+      `Neutrophil %` > 70 ~ "High"
+    ),
+    
+    # Lymphocyte %
+    lymphocyte_group = case_when(
+      `lymphocyte %...14` < 20 ~ "Low",
+      `lymphocyte %...14` >= 20 & `lymphocyte %...14` <= 40 ~ "Normal",
+      `lymphocyte %...14` > 40 ~ "High"
+    ),
+    
+    # Monocyte %
+    monocyte_group = case_when(
+      `monocyte %...15` < 2 ~ "Low",
+      `monocyte %...15` >= 2 & `monocyte %...15` <= 8 ~ "Normal",
+      `monocyte %...15` > 8 ~ "High"
+    )
+    
+  )
+```
+
+```{r}
+table(day1_df$wbc_group)
+table(day1_df$neutrophil_group)
+table(day1_df$lymphocyte_group)
+table(day1_df$monocyte_group)
+```
+```{r}
+# Keep only Day 1 samples with age + outcome group
+age_df <- df %>%
+  filter(Day == 1) %>%
+  select(`Study ID`, `Persistent or Resolving`, Age) %>%
+  filter(!is.na(`Persistent or Resolving`), !is.na(Age))
+
+# View sample sizes
+table(age_df$`Persistent or Resolving`)
+
+# Summary statistics
+age_df %>%
+  group_by(`Persistent or Resolving`) %>%
+  summarise(
+    n = n(),
+    median_age = median(Age, na.rm = TRUE),
+    mean_age = mean(Age, na.rm = TRUE),
+    sd_age = sd(Age, na.rm = TRUE)
+  )
+
+# Wilcoxon rank-sum test
+wilcox.test(
+  Age ~ `Persistent or Resolving`,
+  data = age_df
+)
+```
+```{r}
+library(ggplot2)
+
+ggplot(
+  age_df,
+  aes(
+    x = `Persistent or Resolving`,
+    y = Age,
+    fill = `Persistent or Resolving`
+  )
+) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.15, size = 2) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "Day 1 Age Distribution by Clinical Outcome",
+    x = "",
+    y = "Age"
+  )
+```
+
+```{r}
+lm(
+  `cDC (from raw xCell)` ~ Age + `Persistent or Resolving`,
+  data = day1_df
+)
+```
+

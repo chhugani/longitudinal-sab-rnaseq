@@ -1,0 +1,519 @@
+---
+title: "DeSeq2_LRT_KC_June_2026"
+output: html_document
+date: "2026-06-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+#Use the Wald test in DESeq2 for specific, pair-wise comparisons (e.g., Treatment vs. Control). Use the Likelihood Ratio Test (LRT) to test multiple groups simultaneously, particularly in multi-stage time-course experiments or when identifying genes that change across \(\ge 3\) conditions without predefined pairs.
+
+
+library(readr)
+library(dplyr)
+
+counts_path  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/Featurecounts/counts_featureCounts_updated.txt"
+coldata_path <- "/Users/chhugani/coldata_clean_3.30.26.csv"
+
+clean_sample_id <- function(x) {
+  x <- as.character(x)
+  x <- basename(x)
+  x <- gsub("\r", "", x)
+  x <- trimws(x)
+  x <- sub("\\.bam$", "", x)
+  x <- sub("_sorted$", "", x)
+  x <- sub("^HH0*", "", x)
+  x
+}
+
+# Load counts
+counts_raw <- read.delim(counts_path, check.names = FALSE)
+counts_raw <- counts_raw[!grepl("^__", counts_raw$ID), ]
+
+cts <- counts_raw[, -(1:6)]
+gene_ids <- counts_raw$ID
+colnames(cts) <- clean_sample_id(colnames(cts))
+
+# Load coldata
+coldata <- read.csv(coldata_path, check.names = FALSE, stringsAsFactors = FALSE)
+names(coldata) <- trimws(names(coldata))
+
+coldata$Sample <- clean_sample_id(coldata$Sample)
+
+# Match samples
+common <- intersect(colnames(cts), coldata$Sample)
+
+cat("Samples in counts:", ncol(cts), "\n")
+cat("Samples in coldata:", nrow(coldata), "\n")
+cat("Common samples:", length(common), "\n")
+
+print(head(colnames(cts), 10))
+print(head(coldata$Sample, 10))
+print(head(common, 10))
+
+# Keep and reorder counts
+cts <- cts[, common, drop = FALSE]
+
+# Keep and reorder coldata to match counts
+coldata2 <- coldata %>%
+  filter(Sample %in% common) %>%
+  arrange(match(Sample, common))
+
+stopifnot(identical(colnames(cts), coldata2$Sample))
+
+# Save cleaned outputs
+out_counts_clean  <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/counts_clean.tsv"
+out_coldata_clean <- "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean.tsv"
+
+cts_out <- as.data.frame(cts)
+cts_out <- cbind(ID = gene_ids, cts_out)
+
+write.table(cts_out, out_counts_clean, sep = "\t", quote = FALSE, row.names = FALSE)
+write.table(coldata2, out_coldata_clean, sep = "\t", quote = FALSE, row.names = FALSE)
+
+cat("Saved:\n", out_counts_clean, "\n", out_coldata_clean, "\n")
+```
+
+```{r}
+# =========================
+# Reload cleaned counts + coldata for DESeq2
+# =========================
+
+library(readr)
+library(dplyr)
+library(DESeq2)
+
+# -------------------------
+# 1) Load cleaned counts
+# -------------------------
+cts_df <- read.delim(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/counts_clean.tsv",
+  check.names = FALSE
+)
+
+# Clean gene IDs
+cts_df$ID <- trimws(gsub("\r", "", cts_df$ID))
+cts_df <- cts_df[!is.na(cts_df$ID) & cts_df$ID != "", ]
+
+# Make gene IDs unique if needed
+cts_df$ID <- make.unique(cts_df$ID)
+
+# Set rownames and make count matrix
+rownames(cts_df) <- cts_df$ID
+cts <- as.matrix(cts_df[, -1])
+
+# DESeq2 wants integer counts
+mode(cts) <- "numeric"
+cts <- round(cts)
+mode(cts) <- "integer"
+
+# Remove genes with NA counts if any
+cts <- cts[rowSums(is.na(cts)) == 0, ]
+
+# -------------------------
+# 2) Load cleaned coldata
+# -------------------------
+coldata <- read.delim(
+  "/Users/chhugani/Desktop/KC_SAB_analysis_Nov_2025/DeSeq2/coldata_clean.tsv",
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+# Clean sample IDs
+coldata$Sample <- trimws(gsub("\r", "", coldata$Sample))
+rownames(coldata) <- coldata$Sample
+
+# -------------------------
+# 3) Clean metadata columns
+# -------------------------
+coldata$Status <- factor(coldata$Status)
+
+coldata$Day_raw <- coldata$Day
+coldata$Day <- trimws(as.character(coldata$Day))
+coldata$Day <- gsub("[^0-9]", "", coldata$Day)
+coldata$Day <- factor(coldata$Day, levels = c("1", "3", "5", "7"))
+
+coldata$Subject <- factor(coldata$Subject)
+
+# Check for missing Day or Status
+cat("NA Day:", sum(is.na(coldata$Day)), "\n")
+cat("NA Status:", sum(is.na(coldata$Status)), "\n")
+
+if (sum(is.na(coldata$Day)) > 0) {
+  print(coldata[is.na(coldata$Day), c("Sample", "Status", "Day_raw", "Subject")])
+}
+
+# Drop samples missing Day/Status
+coldata <- coldata[!is.na(coldata$Day) & !is.na(coldata$Status), , drop = FALSE]
+
+# -------------------------
+# 4) Match counts and coldata
+# -------------------------
+cat("All coldata samples in counts?:", all(rownames(coldata) %in% colnames(cts)), "\n")
+
+cts <- cts[, rownames(coldata), drop = FALSE]
+
+stopifnot(identical(colnames(cts), rownames(coldata)))
+
+# -------------------------
+# 5) Final checks
+# -------------------------
+dim(cts)
+dim(coldata)
+
+table(coldata$Status, coldata$Day)
+```
+
+```{r}
+# =========================
+# DESeq2 LRT + DEGreport trajectory clustering
+# =========================
+
+library(DESeq2)
+library(DEGreport)
+
+# Ensure factors are set correctly
+coldata$Status <- factor(coldata$Status)
+coldata$Day <- factor(coldata$Day, levels = c("1", "3", "5", "7"))
+
+# Build DESeq2 object
+dds <- DESeqDataSetFromMatrix(
+  countData = cts,
+  colData = coldata,
+  design = ~ Status + Day + Status:Day
+)
+
+# Basic gene filter
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep, ]
+
+# Run LRT
+dds_lrt <- DESeq(
+  dds,
+  test = "LRT",
+  reduced = ~ Status + Day
+)
+
+# LRT results
+resLRT <- results(dds_lrt)
+summary(resLRT)
+
+# Check model coefficient names for later contrasts
+resultsNames(dds_lrt)
+
+# -------------------------
+# 1) Significant LRT genes
+# Using raw p < 0.05 for exploratory trajectory clustering
+# -------------------------
+sig_LRT <- resLRT[!is.na(resLRT$pvalue) & resLRT$pvalue < 0.05, ]
+
+sig_genes <- rownames(sig_LRT)
+cat("Significant trajectory genes, raw p < 0.05:", length(sig_genes), "\n")
+
+stopifnot(length(sig_genes) > 1)
+
+# -------------------------
+# 2) VST transform
+# -------------------------
+vsd <- vst(dds_lrt, blind = FALSE)
+norm_mat <- assay(vsd)[sig_genes, , drop = FALSE]
+
+# -------------------------
+# 3) DEGreport clustering
+# -------------------------
+cluster_mat <- norm_mat
+meta <- as.data.frame(colData(dds_lrt))
+
+meta$Day <- factor(as.character(meta$Day), levels = c("1", "3", "5", "7"))
+meta$Status <- factor(meta$Status)
+
+clusters <- degPatterns(
+  cluster_mat,
+  metadata = meta,
+  time = "Day",
+  col = "Status"
+)
+
+# Gene-to-cluster mapping
+head(clusters$df)
+
+# Trajectory plot
+clusters$plot
+```
+```{r}
+#Resolving vs Persistent at each day
+
+dds_wald <- DESeq(
+  dds,
+  test = "Wald"
+)
+
+resultsNames(dds_wald)
+
+# Day 1
+res_day1 <- results(
+  dds_wald,
+  name = "Status_Resolving_vs_Persistent"
+)
+
+# Day 3
+res_day3 <- results(
+  dds_wald,
+  contrast = list(
+    c(
+      "Status_Resolving_vs_Persistent",
+      "StatusResolving.Day3"
+    )
+  )
+)
+
+# Day 5
+res_day5 <- results(
+  dds_wald,
+  contrast = list(
+    c(
+      "Status_Resolving_vs_Persistent",
+      "StatusResolving.Day5"
+    )
+  )
+)
+
+# Day 7
+res_day7 <- results(
+  dds_wald,
+  contrast = list(
+    c(
+      "Status_Resolving_vs_Persistent",
+      "StatusResolving.Day7"
+    )
+  )
+)
+
+
+
+
+```
+```{r}
+sum(res_day1$pvalue < 0.05, na.rm = TRUE)
+sum(res_day3$pvalue < 0.05, na.rm = TRUE)
+sum(res_day5$pvalue < 0.05, na.rm = TRUE)
+sum(res_day7$pvalue < 0.05, na.rm = TRUE)
+
+sum(res_day1$padj < 0.05, na.rm=TRUE)
+sum(res_day3$padj < 0.05, na.rm=TRUE)
+sum(res_day5$padj < 0.05, na.rm=TRUE)
+sum(res_day7$padj < 0.05, na.rm=TRUE)
+
+day1_tbl <- as.data.frame(res_day1)
+day1_tbl$gene <- rownames(day1_tbl)
+
+day3_tbl <- as.data.frame(res_day3)
+day3_tbl$gene <- rownames(day3_tbl)
+
+day5_tbl <- as.data.frame(res_day5)
+day5_tbl$gene <- rownames(day5_tbl)
+
+day7_tbl <- as.data.frame(res_day7)
+day7_tbl$gene <- rownames(day7_tbl)
+
+subset(day1_tbl, padj < 0.05)
+subset(day3_tbl, padj < 0.05)
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+sig_genes <- c(
+"ENSG00000154274.15",
+"ENSG00000286522.2",
+"ENSG00000129538.14",
+"ENSG00000211897.9",
+"ENSG00000211950.2"
+)
+
+# Remove version numbers
+sig_genes_clean <- sub("\\..*", "", sig_genes)
+
+AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = sig_genes_clean,
+  keytype = "ENSEMBL",
+  columns = c("SYMBOL", "GENENAME")
+)
+```
+
+```{r}
+day1_top <- day1_tbl[order(day1_tbl$pvalue), ][1:50, ]
+day3_top <- day3_tbl[order(day3_tbl$pvalue), ][1:50, ]
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+library(dplyr)
+
+# Add Ensembl IDs without version numbers
+day1_top$ensembl_id <- sub("\\..*", "", rownames(day1_top))
+day3_top$ensembl_id <- sub("\\..*", "", rownames(day3_top))
+
+# Collect unique IDs
+all_top_ids <- unique(c(day1_top$ensembl_id,
+                        day3_top$ensembl_id))
+
+# Map Ensembl -> Gene Symbol
+gene_map <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = all_top_ids,
+  keytype = "ENSEMBL",
+  columns = c("SYMBOL", "GENENAME")
+)
+
+# Remove duplicate mappings if any
+gene_map <- gene_map[!duplicated(gene_map$ENSEMBL), ]
+
+# Merge annotations back onto Day 1 results
+day1_top_annotated <- merge(
+  day1_top,
+  gene_map,
+  by.x = "ensembl_id",
+  by.y = "ENSEMBL",
+  all.x = TRUE
+)
+
+# Merge annotations back onto Day 3 results
+day3_top_annotated <- merge(
+  day3_top,
+  gene_map,
+  by.x = "ensembl_id",
+  by.y = "ENSEMBL",
+  all.x = TRUE
+)
+
+# Sort by p-value again
+day1_top_annotated <- day1_top_annotated[
+  order(day1_top_annotated$pvalue),
+]
+
+day3_top_annotated <- day3_top_annotated[
+  order(day3_top_annotated$pvalue),
+]
+
+# View top genes
+head(day1_top_annotated[, c("SYMBOL",
+                            "GENENAME",
+                            "log2FoldChange",
+                            "pvalue",
+                            "padj")], 20)
+
+head(day3_top_annotated[, c("SYMBOL",
+                            "GENENAME",
+                            "log2FoldChange",
+                            "pvalue",
+                            "padj")], 20)
+
+# Save
+write.csv(
+  day1_top_annotated,
+  "/Users/chhugani/Desktop/day1_top50_genes_annotated.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  day3_top_annotated,
+  "/Users/chhugani/Desktop/day3_top50_genes_annotated.csv",
+  row.names = FALSE
+)
+
+
+#Positive log2FoldChange = Higher expression in Resolving patients
+#Negative log2FoldChange = Higher expression in Persistent patients
+
+
+
+```
+
+```{r}
+library(EnhancedVolcano)
+library(ggplot2)
+
+# Full Day 1 table
+day1_full <- as.data.frame(res_day1)
+day1_full$ensembl_id <- sub("\\..*", "", rownames(day1_full))
+
+day1_full <- merge(
+  day1_full,
+  gene_map,
+  by.x = "ensembl_id",
+  by.y = "ENSEMBL",
+  all.x = TRUE
+)
+
+day1_full$label <- ifelse(
+  day1_full$pvalue < 0.001 & abs(day1_full$log2FoldChange) > 1.5,
+  day1_full$SYMBOL,
+  ""
+)
+
+EnhancedVolcano(
+  day1_full,
+  lab = day1_full$label,
+  x = "log2FoldChange",
+  y = "pvalue",
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  title = "Day 1: Resolving vs Persistent",
+  subtitle = "Positive = Resolving, Negative = Persistent",
+  caption = "",
+  pointSize = 2,
+  labSize = 4,
+  drawConnectors = TRUE,
+  widthConnectors = 0.5,
+  max.overlaps = 15,
+  legendPosition = "none"
+
+)
+
+
+```
+
+```{r}
+
+# Full Day 1 table
+day3_full <- as.data.frame(res_day3)
+day3_full$ensembl_id <- sub("\\..*", "", rownames(day3_full))
+
+day3_full <- merge(
+  day3_full,
+  gene_map,
+  by.x = "ensembl_id",
+  by.y = "ENSEMBL",
+  all.x = TRUE
+)
+
+day3_full$label <- ifelse(
+  day3_full$pvalue < 0.001 & abs(day3_full$log2FoldChange) > 1.5,
+  day3_full$SYMBOL,
+  ""
+)
+
+EnhancedVolcano(
+  day3_full,
+  lab = day3_full$label,
+  x = "log2FoldChange",
+  y = "pvalue",
+  pCutoff = 0.05,
+  FCcutoff = 1,
+  title = "Day 3: Resolving vs Persistent",
+  subtitle = "Positive = Resolving, Negative = Persistent",
+  caption = "",
+  pointSize = 2,
+  labSize = 4,
+  drawConnectors = TRUE,
+  widthConnectors = 0.5,
+  max.overlaps = 15,
+  legendPosition = "none"
+
+)
+```
+
