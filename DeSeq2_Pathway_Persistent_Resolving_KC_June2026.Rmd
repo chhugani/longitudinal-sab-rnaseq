@@ -1,0 +1,4913 @@
+---
+title: "DeSeq2_Pathway_Persistent_Resolving_KC_June2026"
+output: html_document
+date: "2026-06-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+# =========================
+# Full 147-sample RNA-seq setup
+# Keep only Day 1, 3, 5, 7
+# Build DESeq2 + VST object
+# =========================
+
+library(readr)
+library(dplyr)
+library(tibble)
+library(DESeq2)
+
+# =========================
+# 1) File paths
+# =========================
+
+counts_path  <- "/Users/chhugani/Desktop/featureCounts_HGNC_3.27.26.csv"
+coldata_path <- "/Users/chhugani/coldata_clean_3.30.26.csv"
+
+# =========================
+# 2) Helper function to clean sample IDs
+# =========================
+
+clean_sample_id <- function(x) {
+  x <- as.character(x)
+  x <- basename(x)
+  x <- gsub("\r", "", x)
+  x <- trimws(x)
+  x <- sub("\\.bam$", "", x)
+  x <- sub("_sorted$", "", x)
+  x <- sub("^HH0*", "", x)
+  x
+}
+
+# =========================
+# 3) Load counts and metadata
+# =========================
+
+counts_raw <- read.csv(
+  counts_path,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+coldata <- read.csv(
+  coldata_path,
+  check.names = FALSE,
+  stringsAsFactors = FALSE
+)
+
+cat("Counts dimensions:", dim(counts_raw), "\n")
+cat("Coldata dimensions:", dim(coldata), "\n")
+
+# =========================
+# 4) Prepare count matrix
+# =========================
+
+# First column is gene symbol/ID
+gene_ids <- counts_raw$Gene
+
+cts <- counts_raw[, -1, drop = FALSE]
+
+# Clean sample names
+colnames(cts) <- clean_sample_id(colnames(cts))
+
+# Convert counts to numeric integers
+cts <- as.data.frame(cts)
+
+cts[] <- lapply(cts, function(x) {
+  as.integer(round(as.numeric(x)))
+})
+
+# Use gene names as rownames
+rownames(cts) <- make.unique(as.character(gene_ids))
+
+# =========================
+# 5) Prepare metadata
+# =========================
+
+names(coldata) <- trimws(names(coldata))
+
+coldata$Sample <- clean_sample_id(coldata$Sample)
+
+# =========================
+# 6) Match counts and metadata
+# =========================
+
+common <- intersect(colnames(cts), coldata$Sample)
+
+cat("Samples in counts:", ncol(cts), "\n")
+cat("Samples in coldata:", nrow(coldata), "\n")
+cat("Common samples:", length(common), "\n")
+
+missing_from_counts <- setdiff(coldata$Sample, colnames(cts))
+missing_from_coldata <- setdiff(colnames(cts), coldata$Sample)
+
+cat("Metadata samples missing from counts:", length(missing_from_counts), "\n")
+cat("Counts samples missing from metadata:", length(missing_from_coldata), "\n")
+
+print(missing_from_counts)
+print(missing_from_coldata)
+
+# Keep matched samples
+cts_matched <- cts[, common, drop = FALSE]
+
+coldata_matched <- coldata %>%
+  filter(Sample %in% common) %>%
+  arrange(match(Sample, common))
+
+stopifnot(identical(colnames(cts_matched), coldata_matched$Sample))
+
+cat("Final matched counts:", dim(cts_matched), "\n")
+cat("Final matched metadata:", dim(coldata_matched), "\n")
+
+# =========================
+# 7) Keep only Day 1, 3, 5, 7
+# =========================
+
+coldata_deseq <- coldata_matched %>%
+  mutate(
+    Day = as.numeric(as.character(Day))
+  ) %>%
+  filter(Day %in% c(1, 3, 5, 7))
+
+cts_deseq <- cts_matched[, coldata_deseq$Sample, drop = FALSE]
+
+stopifnot(identical(colnames(cts_deseq), coldata_deseq$Sample))
+
+rownames(coldata_deseq) <- coldata_deseq$Sample
+
+cat("Samples retained for Day 1/3/5/7:", ncol(cts_deseq), "\n")
+
+table(unique(coldata_deseq[c("Subject", "Status")])$Status)
+
+# =========================
+# 8) Create DESeq2 object
+# =========================
+
+coldata_deseq$Status <- factor(
+  coldata_deseq$Status,
+  levels = c("Persistent", "Resolving")
+)
+
+coldata_deseq$Day <- factor(
+  coldata_deseq$Day,
+  levels = c(1, 3, 5, 7)
+)
+
+dds_full <- DESeqDataSetFromMatrix(
+  countData = as.matrix(cts_deseq),
+  colData = coldata_deseq,
+  design = ~ Status + Day + Status:Day
+)
+
+# =========================
+# 9) Filter low-count genes
+# =========================
+
+keep <- rowSums(counts(dds_full) >= 10) >= 3
+dds_full <- dds_full[keep, ]
+
+cat("\nDESeq2 object after filtering:\n")
+print(dim(dds_full))
+
+# =========================
+# 10) Run VST
+# =========================
+
+vsd_full <- vst(dds_full, blind = FALSE)
+
+cat("\nVST dimensions:\n")
+print(dim(assay(vsd_full)))
+
+# =========================
+# 11) Save cleaned objects
+# =========================
+
+saveRDS(
+  dds_full,
+  "/Users/chhugani/Desktop/dds_full_Day1_3_5_7.rds"
+)
+
+saveRDS(
+  vsd_full,
+  "/Users/chhugani/Desktop/vsd_full_Day1_3_5_7.rds"
+)
+
+write.csv(
+  coldata_deseq,
+  "/Users/chhugani/Desktop/coldata_full_Day1_3_5_7.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  as.data.frame(cts_deseq) %>%
+    rownames_to_column("Gene"),
+  "/Users/chhugani/Desktop/counts_full_Day1_3_5_7.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+# =========================
+# Pathway-level VST figures: OXPHOS + Glycolysis
+# Corrected full Day 1/3/5/7 RNA-seq cohort
+# =========================
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+# =========================
+# 1) Use corrected full objects
+# =========================
+
+vsd <- vsd_full
+coldata <- coldata_deseq
+
+vst_mat <- assay(vsd)
+
+# =========================
+# 2) Annotate VST matrix
+# =========================
+
+vst_df <- as.data.frame(vst_mat) %>%
+  rownames_to_column("gene") %>%
+  mutate(
+    SYMBOL = gene
+  )
+
+# Since this counts file is HGNC gene-symbol based,
+# rownames are already gene symbols.
+# If any duplicated symbols were made unique with ".1", remove suffix only if needed:
+vst_df <- vst_df %>%
+  mutate(
+    SYMBOL_clean = sub("\\.\\d+$", "", SYMBOL)
+  )
+
+# =========================
+# 3) Metadata
+# =========================
+
+meta <- as.data.frame(coldata) %>%
+  rownames_to_column("Sample_Name") %>%
+  mutate(
+    Day = as.character(Day),
+    Status = as.character(Status)
+  )
+
+# =========================
+# 4) Function to calculate pathway VST scores
+# =========================
+
+calculate_pathway_scores <- function(pathway_genes, pathway_name) {
+  
+  pathway_vst <- vst_df %>%
+    filter(SYMBOL_clean %in% pathway_genes)
+  
+  cat(pathway_name, "genes found:", nrow(pathway_vst), "\n")
+  
+  pathway_scores <- pathway_vst %>%
+    dplyr::select(gene, SYMBOL_clean, all_of(colnames(vst_mat))) %>%
+    pivot_longer(
+      cols = all_of(colnames(vst_mat)),
+      names_to = "Sample_Name",
+      values_to = "VST"
+    ) %>%
+    group_by(Sample_Name) %>%
+    summarise(
+      Pathway_VST_Score = mean(VST, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(meta, by = "Sample_Name") %>%
+    mutate(
+      Pathway = pathway_name
+    )
+  
+  return(pathway_scores)
+}
+
+# =========================
+# 5) Calculate OXPHOS and Glycolysis scores
+# =========================
+
+oxphos_scores_full <- calculate_pathway_scores(
+  oxphos_genes,
+  "OXPHOS"
+)
+
+glycolysis_scores_full <- calculate_pathway_scores(
+  glycolysis_genes,
+  "Glycolysis"
+)
+
+# =========================
+# 6) Function: Day 1 -> Day 3 line plot
+# =========================
+
+make_day1_day3_plot <- function(scores_df, pathway_name, y_label_text) {
+  
+  summary_df <- scores_df %>%
+    filter(Day %in% c("1", "3")) %>%
+    group_by(Status, Day) %>%
+    summarise(
+      n = n(),
+      mean_score = mean(Pathway_VST_Score, na.rm = TRUE),
+      se_score = sd(Pathway_VST_Score, na.rm = TRUE) / sqrt(n),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Day = factor(
+        Day,
+        levels = c("1", "3"),
+        labels = c("Day 1", "Day 3")
+      )
+    )
+  
+  print(summary_df)
+  
+  p <- ggplot(
+    summary_df,
+    aes(
+      x = Day,
+      y = mean_score,
+      group = Status,
+      color = Status
+    )
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 3) +
+    geom_errorbar(
+      aes(
+        ymin = mean_score - se_score,
+        ymax = mean_score + se_score
+      ),
+      width = 0.12
+    ) +
+    theme_classic(base_size = 14) +
+    labs(
+      title = paste0("Early ", pathway_name, " Expression"),
+      subtitle = "Corrected full Day 1/3/5/7 RNA-seq cohort",
+      x = "",
+      y = y_label_text,
+      color = "Group"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(size = 10),
+      legend.position = "bottom"
+    )
+  
+  return(p)
+}
+
+# =========================
+# 7) Create OXPHOS and Glycolysis Day 1 -> Day 3 figures
+# =========================
+
+fig_oxphos_day1_day3_full <- make_day1_day3_plot(
+  oxphos_scores_full,
+  "OXPHOS",
+  "Mean VST expression of Hallmark OXPHOS genes"
+)
+
+fig_glycolysis_day1_day3_full <- make_day1_day3_plot(
+  glycolysis_scores_full,
+  "Glycolysis",
+  "Mean VST expression of Hallmark Glycolysis genes"
+)
+
+fig_oxphos_day1_day3_full
+fig_glycolysis_day1_day3_full
+
+# =========================
+# 8) Save figures
+# =========================
+
+ggsave(
+  "/Users/chhugani/Desktop/OXPHOS_Day1_Day3_FULL124.png",
+  fig_oxphos_day1_day3_full,
+  width = 6,
+  height = 5,
+  dpi = 300
+)
+
+ggsave(
+  "/Users/chhugani/Desktop/Glycolysis_Day1_Day3_FULL124.png",
+  fig_glycolysis_day1_day3_full,
+  width = 6,
+  height = 5,
+  dpi = 300
+)
+
+# =========================
+# 9) Save pathway scores for later ΔVST analysis
+# =========================
+
+write.csv(
+  oxphos_scores_full,
+  "/Users/chhugani/Desktop/OXPHOS_PathwayScores_FULL124.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  glycolysis_scores_full,
+  "/Users/chhugani/Desktop/Glycolysis_PathwayScores_FULL124.csv",
+  row.names = FALSE
+)
+```
+```{r}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# =========================
+# 1) Read resolution table
+# =========================
+
+resolution_path <- "/Users/chhugani/Desktop/Resolution_table.xlsx"
+
+resolution_table <- read_excel(resolution_path)
+
+resolution_table_clean <- resolution_table %>%
+  filter(Include_in_Resolution_Analysis == "Yes") %>%
+  mutate(
+    Resolution_Sample_Name = clean_sample_id(Resolution_Sample_Name),
+    Resolution_Group = factor(
+      Resolution_Group,
+      levels = c("Resolving_cleared", "Persistent_Resolution")
+    )
+  )
+
+resolution_table_clean %>%
+  count(Resolution_Group)
+
+# =========================
+# 2) Match to corrected full VST object
+# =========================
+
+vst_mat_full <- assay(vsd_full)
+
+resolution_samples <- resolution_table_clean$Resolution_Sample_Name
+
+matched_samples <- intersect(resolution_samples, colnames(vst_mat_full))
+missing_samples <- setdiff(resolution_samples, colnames(vst_mat_full))
+
+cat("Resolution samples in table:", length(resolution_samples), "\n")
+cat("Matched samples in VST:", length(matched_samples), "\n")
+cat("Missing samples:", length(missing_samples), "\n")
+
+missing_samples
+
+resolution_table_matched <- resolution_table_clean %>%
+  filter(Resolution_Sample_Name %in% matched_samples)
+
+resolution_table_matched %>%
+  count(Resolution_Group)
+
+# =========================
+# 3) Function: resolution pathway boxplot
+# =========================
+
+make_resolution_pathway_plot <- function(pathway_genes, pathway_name, y_label_text, save_path) {
+  
+  pathway_vst <- as.data.frame(vst_mat_full) %>%
+    rownames_to_column("SYMBOL") %>%
+    mutate(
+      SYMBOL_clean = sub("\\.\\d+$", "", SYMBOL)
+    ) %>%
+    filter(SYMBOL_clean %in% pathway_genes)
+  
+  cat(pathway_name, "genes found:", nrow(pathway_vst), "\n")
+  
+  pathway_scores <- pathway_vst %>%
+    dplyr::select(SYMBOL_clean, all_of(matched_samples)) %>%
+    tidyr::pivot_longer(
+      cols = all_of(matched_samples),
+      names_to = "Resolution_Sample_Name",
+      values_to = "VST"
+    ) %>%
+    group_by(Resolution_Sample_Name) %>%
+    summarise(
+      Pathway_VST_Score = mean(VST, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(
+      resolution_table_matched %>%
+        dplyr::select(Resolution_Sample_Name, Resolution_Group),
+      by = "Resolution_Sample_Name"
+    ) %>%
+    mutate(
+      Resolution_Group = factor(
+        Resolution_Group,
+        levels = c("Resolving_cleared", "Persistent_Resolution"),
+        labels = c("Resolving Day 3", "Persistent Resolution")
+      )
+    )
+  
+  print(
+    pathway_scores %>%
+      count(Resolution_Group)
+  )
+  
+  print(
+    pathway_scores %>%
+      group_by(Resolution_Group) %>%
+      summarise(
+        n = n(),
+        mean_score = mean(Pathway_VST_Score, na.rm = TRUE),
+        median_score = median(Pathway_VST_Score, na.rm = TRUE),
+        sd_score = sd(Pathway_VST_Score, na.rm = TRUE),
+        .groups = "drop"
+      )
+  )
+  
+  print(
+    wilcox.test(Pathway_VST_Score ~ Resolution_Group, data = pathway_scores)
+  )
+  
+  p <- ggplot(
+    pathway_scores,
+    aes(
+      x = Resolution_Group,
+      y = Pathway_VST_Score,
+      fill = Resolution_Group
+    )
+  ) +
+    geom_boxplot(
+      width = 0.5,
+      alpha = 0.6,
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      width = 0.15,
+      size = 2.5,
+      alpha = 0.8
+    ) +
+    theme_classic(base_size = 14) +
+    labs(
+      title = paste0(pathway_name, " Expression at Bacteremia Resolution"),
+      subtitle = "Resolving Day 3 versus Persistent patient-specific resolution samples",
+      x = "",
+      y = y_label_text
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 13),
+      plot.subtitle = element_text(size = 10),
+      legend.position = "none",
+      axis.text.x = element_text(face = "bold")
+    )
+  
+  print(p)
+  
+  ggsave(
+    save_path,
+    p,
+    width = 6,
+    height = 5,
+    dpi = 300
+  )
+  
+  return(pathway_scores)
+}
+```
+```{r}
+# =========================
+# Create vsd_all: full 147-sample VST object
+# For event-based resolution analyses
+# =========================
+
+library(DESeq2)
+library(dplyr)
+library(tibble)
+
+# Assumes these already exist from your full setup:
+# cts_matched      = counts matrix with all 147 matched samples
+# coldata_matched  = metadata with all 147 matched samples
+
+# =========================
+# 1) Prepare metadata
+# =========================
+
+coldata_all <- coldata_matched
+
+rownames(coldata_all) <- coldata_all$Sample
+
+coldata_all$Status <- factor(
+  coldata_all$Status,
+  levels = c("Persistent", "Resolving")
+)
+
+# Keep Day as factor because these are event/irregular timepoints
+coldata_all$Day <- factor(coldata_all$Day)
+
+# Confirm full cohort
+cat("Full samples:", nrow(coldata_all), "\n")
+
+coldata_all %>%
+  distinct(Subject, Status) %>%
+  count(Status)
+
+coldata_all %>%
+  count(Status, Day)
+
+# =========================
+# 2) Create DESeq2 object with all 147 samples
+# =========================
+
+dds_all <- DESeqDataSetFromMatrix(
+  countData = as.matrix(cts_matched),
+  colData = coldata_all,
+  design = ~ Status
+)
+
+# Note:
+# design = ~ Status is sufficient for VST normalization used in pathway scoring.
+# We are not using this object for time-course DE testing.
+
+# =========================
+# 3) Filter low-count genes
+# =========================
+
+keep <- rowSums(counts(dds_all) >= 10) >= 3
+dds_all <- dds_all[keep, ]
+
+cat("dds_all dimensions after filtering:\n")
+print(dim(dds_all))
+
+# =========================
+# 4) Run VST
+# =========================
+
+vsd_all <- vst(dds_all, blind = FALSE)
+
+cat("vsd_all dimensions:\n")
+print(dim(assay(vsd_all)))
+
+# =========================
+# 5) Save objects
+# =========================
+
+saveRDS(
+  dds_all,
+  "/Users/chhugani/Desktop/dds_all_147samples.rds"
+)
+
+saveRDS(
+  vsd_all,
+  "/Users/chhugani/Desktop/vsd_all_147samples.rds"
+)
+```
+```{r}
+# =========================
+# Resolution pathway VST analysis using vsd_all
+# Creates/saves boxplots + Wilcoxon tests
+# Pathways: OXPHOS and Glycolysis
+# =========================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(writexl)
+
+# =========================
+# 1) Read resolution table
+# =========================
+
+resolution_path <- "/Users/chhugani/Desktop/Resolution_table.xlsx"
+
+resolution_table <- read_excel(resolution_path)
+
+resolution_table_clean <- resolution_table %>%
+  filter(Include_in_Resolution_Analysis == "Yes") %>%
+  mutate(
+    Resolution_Sample_Name = clean_sample_id(Resolution_Sample_Name),
+    Resolution_Group = factor(
+      Resolution_Group,
+      levels = c("Resolving_cleared", "Persistent_Resolution")
+    )
+  )
+
+resolution_table_clean %>%
+  count(Resolution_Group)
+
+# =========================
+# 2) Match resolution samples to vsd_all
+# =========================
+
+vst_mat_all <- assay(vsd_all)
+
+resolution_samples <- resolution_table_clean$Resolution_Sample_Name
+
+matched_samples <- intersect(resolution_samples, colnames(vst_mat_all))
+missing_samples <- setdiff(resolution_samples, colnames(vst_mat_all))
+
+cat("Resolution samples in table:", length(resolution_samples), "\n")
+cat("Matched samples in vsd_all:", length(matched_samples), "\n")
+cat("Missing samples:", length(missing_samples), "\n")
+
+missing_samples
+
+resolution_table_matched <- resolution_table_clean %>%
+  filter(Resolution_Sample_Name %in% matched_samples)
+
+resolution_table_matched %>%
+  count(Resolution_Group)
+
+# =========================
+# 3) Prepare VST dataframe
+# =========================
+
+vst_df_all <- as.data.frame(vst_mat_all) %>%
+  rownames_to_column("Gene") %>%
+  mutate(
+    Gene_clean = sub("\\.\\d+$", "", Gene)
+  )
+
+# =========================
+# 4) Function to make resolution boxplot + Wilcoxon
+# =========================
+
+run_resolution_pathway <- function(pathway_genes,
+                                   pathway_name,
+                                   y_label,
+                                   save_file) {
+  
+  pathway_vst <- vst_df_all %>%
+    filter(Gene_clean %in% pathway_genes)
+  
+  cat("\n=========================\n")
+  cat(pathway_name, "\n")
+  cat("=========================\n")
+  cat("Genes found:", nrow(pathway_vst), "\n")
+  
+  pathway_scores <- pathway_vst %>%
+    dplyr::select(Gene_clean, all_of(matched_samples)) %>%
+    pivot_longer(
+      cols = all_of(matched_samples),
+      names_to = "Resolution_Sample_Name",
+      values_to = "VST"
+    ) %>%
+    group_by(Resolution_Sample_Name) %>%
+    summarise(
+      Mean_VST = mean(VST, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(
+      resolution_table_matched %>%
+        dplyr::select(
+          Resolution_Sample_Name,
+          Resolution_Group
+        ),
+      by = "Resolution_Sample_Name"
+    ) %>%
+    mutate(
+      Resolution_Group_Label = factor(
+        Resolution_Group,
+        levels = c("Resolving_cleared", "Persistent_Resolution"),
+        labels = c("Resolving\nCleared", "Persistent\nResolution")
+      )
+    )
+  
+  # Summary stats
+  summary_stats <- pathway_scores %>%
+    group_by(Resolution_Group) %>%
+    summarise(
+      n = n(),
+      mean = mean(Mean_VST, na.rm = TRUE),
+      median = median(Mean_VST, na.rm = TRUE),
+      sd = sd(Mean_VST, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  print(summary_stats)
+  
+  # Wilcoxon rank-sum test
+  wilcox_result <- wilcox.test(
+    Mean_VST ~ Resolution_Group,
+    data = pathway_scores,
+    exact = FALSE
+  )
+  
+  print(wilcox_result)
+  
+  # Plot
+  p <- ggplot(
+    pathway_scores,
+    aes(
+      x = Resolution_Group_Label,
+      y = Mean_VST,
+      fill = Resolution_Group_Label
+    )
+  ) +
+    geom_boxplot(
+      width = 0.55,
+      alpha = 0.6,
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      width = 0.12,
+      size = 2.5,
+      alpha = 0.9
+    ) +
+    theme_classic(base_size = 14) +
+  scale_fill_manual(
+    values = c(
+      "Resolving\nCleared" = "#66C2C4",     # blue
+      "Persistent\nResolution" = "#E79A95"  # red
+    )
+  ) +
+  labs(
+    title = paste0(pathway_name, " Expression at Bacterial Resolution"),
+    x = "",
+    y = y_label
+  ) +
+
+    theme(
+      legend.position = "none",
+      plot.title = element_text(
+        size = 13,
+        face = "bold"
+      ),
+      axis.text.x = element_text(
+        face = "bold"
+      )
+    )
+  
+  print(p)
+  
+  ggsave(
+    filename = save_file,
+    plot = p,
+    width = 6,
+    height = 5,
+    dpi = 300
+  )
+  
+  return(
+    list(
+      scores = pathway_scores,
+      summary = summary_stats,
+      wilcox = wilcox_result,
+      plot = p
+    )
+  )
+}
+
+# =========================
+# 5) Run OXPHOS
+# =========================
+
+oxphos_resolution_result <- run_resolution_pathway(
+  pathway_genes = oxphos_genes,
+  pathway_name = "OXPHOS",
+  y_label = "Mean VST expression of Hallmark OXPHOS genes",
+  save_file = "/Users/chhugani/Desktop/OXPHOS_Resolution_vsd_all.png"
+)
+
+# =========================
+# 6) Run Glycolysis
+# =========================
+
+glycolysis_resolution_result <- run_resolution_pathway(
+  pathway_genes = glycolysis_genes,
+  pathway_name = "Glycolysis",
+  y_label = "Mean VST expression of Hallmark Glycolysis genes",
+  save_file = "/Users/chhugani/Desktop/Glycolysis_Resolution_vsd_all.png"
+)
+
+# =========================
+# 7) Export summary/statistics
+# =========================
+
+resolution_pathway_summary <- bind_rows(
+  oxphos_resolution_result$summary %>%
+    mutate(
+      Pathway = "OXPHOS",
+      Wilcoxon_pvalue = oxphos_resolution_result$wilcox$p.value
+    ),
+  glycolysis_resolution_result$summary %>%
+    mutate(
+      Pathway = "Glycolysis",
+      Wilcoxon_pvalue = glycolysis_resolution_result$wilcox$p.value
+    )
+) %>%
+  dplyr::select(
+    Pathway,
+    Resolution_Group,
+    n,
+    mean,
+    median,
+    sd,
+    Wilcoxon_pvalue
+  )
+
+write_xlsx(
+  list(
+    Summary = resolution_pathway_summary,
+    OXPHOS_scores = oxphos_resolution_result$scores,
+    Glycolysis_scores = glycolysis_resolution_result$scores
+  ),
+  "/Users/chhugani/Desktop/Resolution_OXPHOS_Glycolysis_vsd_all_summary.xlsx"
+)
+
+resolution_pathway_summary
+```
+```{r}
+library(msigdbr)
+library(dplyr)
+
+hallmark <- msigdbr(
+  species = "Homo sapiens",
+  category = "H"
+)
+
+inflammatory_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_INFLAMMATORY_RESPONSE") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+tnfa_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_TNFA_SIGNALING_VIA_NFKB") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+ifng_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+ros_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+complement_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_COMPLEMENT") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+coagulation_genes <- hallmark %>%
+  filter(gs_name == "HALLMARK_COAGULATION") %>%
+  pull(gene_symbol) %>%
+  unique()
+
+data.frame(
+  Pathway = c(
+    "Inflammatory Response",
+    "TNFA/NFKB",
+    "IFNG Response",
+    "ROS",
+    "Complement",
+    "Coagulation"
+  ),
+  Genes = c(
+    length(inflammatory_genes),
+    length(tnfa_genes),
+    length(ifng_genes),
+    length(ros_genes),
+    length(complement_genes),
+    length(coagulation_genes)
+  )
+)
+
+
+
+
+
+
+
+```
+
+```{r}
+inflammatory_day1_day3 <- make_day1_day3_plot(
+  calculate_pathway_scores(
+    inflammatory_genes,
+    "Inflammatory Response"
+  ),
+  "Inflammatory Response",
+  "Mean VST expression of Hallmark inflammatory response genes"
+)
+
+
+tnfa_day1_day3 <- make_day1_day3_plot(
+  calculate_pathway_scores(
+    tnfa_genes,
+    "TNFα/NFκB Signaling"
+  ),
+  "TNFα/NFκB Signaling",
+  "Mean VST expression of Hallmark TNFα/NFκB genes"
+)
+
+
+ifng_scores_full <- calculate_pathway_scores(
+  ifng_genes,
+  "IFNγ Response"
+)
+
+fig_ifng_day1_day3 <- make_day1_day3_plot(
+  ifng_scores_full,
+  "IFNγ Response",
+  "Mean VST expression of Hallmark IFNγ response genes"
+)
+
+fig_ifng_day1_day3
+
+fig_ifng_day1_day3 <- make_day1_day3_plot(
+  ifng_scores_full,
+  "IFNγ Response",
+  "Mean VST expression of Hallmark IFNγ response genes"
+)
+
+fig_ifng_day1_day3
+
+
+ros_scores_full <- calculate_pathway_scores(
+  ros_genes,
+  "Reactive Oxygen Species"
+)
+
+fig_ros_day1_day3 <- make_day1_day3_plot(
+  ros_scores_full,
+  "Reactive Oxygen Species",
+  "Mean VST expression of Hallmark ROS pathway genes"
+)
+
+fig_ros_day1_day3
+
+complement_scores_full <- calculate_pathway_scores(
+  complement_genes,
+  "Complement"
+)
+
+fig_complement_day1_day3 <- make_day1_day3_plot(
+  complement_scores_full,
+  "Complement",
+  "Mean VST expression of Hallmark complement genes"
+)
+
+fig_complement_day1_day3
+
+
+coagulation_scores_full <- calculate_pathway_scores(
+  coagulation_genes,
+  "Coagulation"
+)
+
+fig_coagulation_day1_day3 <- make_day1_day3_plot(
+  coagulation_scores_full,
+  "Coagulation",
+  "Mean VST expression of Hallmark coagulation genes"
+)
+
+fig_coagulation_day1_day3
+
+ggsave("IFNG_Day1_Day3_FULL124.png",
+       fig_ifng_day1_day3,
+       width = 6, height = 5, dpi = 300)
+
+ggsave("ROS_Day1_Day3_FULL124.png",
+       fig_ros_day1_day3,
+       width = 6, height = 5, dpi = 300)
+
+ggsave("Complement_Day1_Day3_FULL124.png",
+       fig_complement_day1_day3,
+       width = 6, height = 5, dpi = 300)
+
+ggsave("Coagulation_Day1_Day3_FULL124.png",
+       fig_coagulation_day1_day3,
+       width = 6, height = 5, dpi = 300)
+
+inflammatory_scores_full <- calculate_pathway_scores(
+  inflammatory_genes,
+  "Inflammatory Response"
+)
+
+fig_inflammatory_day1_day3 <- make_day1_day3_plot(
+  inflammatory_scores_full,
+  "Inflammatory Response",
+  "Mean VST expression of Hallmark inflammatory response genes"
+)
+
+fig_inflammatory_day1_day3
+
+ggsave(
+  "/Users/chhugani/Desktop/Inflammatory_Response_Day1_Day3_FULL124.png",
+  fig_inflammatory_day1_day3,
+  width = 6,
+  height = 5,
+  dpi = 300
+)
+
+tnfa_scores_full <- calculate_pathway_scores(
+  tnfa_genes,
+  "TNFα/NFκB Signaling"
+)
+
+fig_tnfa_day1_day3 <- make_day1_day3_plot(
+  tnfa_scores_full,
+  "TNFα/NFκB Signaling",
+  "Mean VST expression of Hallmark TNFα/NFκB genes"
+)
+
+fig_tnfa_day1_day3
+
+
+ggsave(
+  "/Users/chhugani/Desktop/TNFA_NFKB_Day1_Day3_FULL124.png",
+  fig_tnfa_day1_day3,
+  width = 6,
+  height = 5,
+  dpi = 300
+)
+
+
+```
+```{r}
+# =========================
+# Resolution-stage pathway figures for all pathways
+# Uses vsd_all + Resolution_table.xlsx
+# =========================
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(ggplot2)
+library(writexl)
+
+# =========================
+# 1) Read and match resolution table
+# =========================
+
+resolution_path <- "/Users/chhugani/Desktop/Resolution_table.xlsx"
+
+resolution_table <- read_excel(resolution_path)
+
+resolution_table_clean <- resolution_table %>%
+  filter(Include_in_Resolution_Analysis == "Yes") %>%
+  mutate(
+    Resolution_Sample_Name = clean_sample_id(Resolution_Sample_Name),
+    Resolution_Group = factor(
+      Resolution_Group,
+      levels = c("Resolving_cleared", "Persistent_Resolution")
+    )
+  )
+
+vst_mat_all <- assay(vsd_all)
+
+resolution_samples <- resolution_table_clean$Resolution_Sample_Name
+matched_samples <- intersect(resolution_samples, colnames(vst_mat_all))
+
+resolution_table_matched <- resolution_table_clean %>%
+  filter(Resolution_Sample_Name %in% matched_samples)
+
+resolution_table_matched %>%
+  count(Resolution_Group)
+
+# =========================
+# 2) Prepare VST dataframe
+# =========================
+
+vst_df_all <- as.data.frame(vst_mat_all) %>%
+  rownames_to_column("Gene") %>%
+  mutate(
+    Gene_clean = sub("\\.\\d+$", "", Gene)
+  )
+
+# =========================
+# 3) Function: resolution boxplot + Wilcoxon + save PNG
+# =========================
+
+run_resolution_pathway <- function(pathway_genes,
+                                   pathway_name,
+                                   y_label,
+                                   save_file) {
+  
+  pathway_vst <- vst_df_all %>%
+    filter(Gene_clean %in% pathway_genes)
+  
+  cat("\n=========================\n")
+  cat(pathway_name, "\n")
+  cat("=========================\n")
+  cat("Genes found:", nrow(pathway_vst), "\n")
+  
+  pathway_scores <- pathway_vst %>%
+    dplyr::select(Gene_clean, all_of(matched_samples)) %>%
+    pivot_longer(
+      cols = all_of(matched_samples),
+      names_to = "Resolution_Sample_Name",
+      values_to = "VST"
+    ) %>%
+    group_by(Resolution_Sample_Name) %>%
+    summarise(
+      Mean_VST = mean(VST, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    left_join(
+      resolution_table_matched %>%
+        dplyr::select(Resolution_Sample_Name, Resolution_Group),
+      by = "Resolution_Sample_Name"
+    ) %>%
+    mutate(
+      Resolution_Group_Label = factor(
+        Resolution_Group,
+        levels = c("Resolving_cleared", "Persistent_Resolution"),
+        labels = c("Resolving\nCleared", "Persistent\nResolution")
+      )
+    )
+  
+  summary_stats <- pathway_scores %>%
+    group_by(Resolution_Group) %>%
+    summarise(
+      n = n(),
+      mean = mean(Mean_VST, na.rm = TRUE),
+      median = median(Mean_VST, na.rm = TRUE),
+      sd = sd(Mean_VST, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  wilcox_result <- wilcox.test(
+    Mean_VST ~ Resolution_Group,
+    data = pathway_scores,
+    exact = FALSE
+  )
+  
+  print(summary_stats)
+  print(wilcox_result)
+  
+  p <- ggplot(
+    pathway_scores,
+    aes(
+      x = Resolution_Group_Label,
+      y = Mean_VST,
+      fill = Resolution_Group_Label
+    )
+  ) +
+    geom_boxplot(
+      width = 0.55,
+      alpha = 0.6,
+      outlier.shape = NA
+    ) +
+    geom_jitter(
+      width = 0.12,
+      size = 2.5,
+      alpha = 0.9
+    ) +
+    scale_fill_manual(
+      values = c(
+        "Resolving\nCleared" = "#66C2C4",
+        "Persistent\nResolution" = "#E79A95"
+      )
+    ) +
+    theme_classic(base_size = 14) +
+    labs(
+      title = paste0(pathway_name, " Expression at Bacterial Resolution"),
+      x = "",
+      y = y_label
+    ) +
+    theme(
+      legend.position = "none",
+      plot.title = element_text(size = 13, face = "bold"),
+      axis.text.x = element_text(face = "bold")
+    )
+  
+  print(p)
+  
+  ggsave(
+    filename = save_file,
+    plot = p,
+    width = 6,
+    height = 5,
+    dpi = 300
+  )
+  
+  return(
+    list(
+      scores = pathway_scores,
+      summary = summary_stats,
+      wilcox = wilcox_result,
+      plot = p,
+      genes_found = nrow(pathway_vst)
+    )
+  )
+}
+
+# =========================
+# 4) Run all resolution-stage pathways
+# =========================
+
+res_oxphos <- run_resolution_pathway(
+  oxphos_genes,
+  "OXPHOS",
+  "Mean VST expression of Hallmark OXPHOS genes",
+  "/Users/chhugani/Desktop/Resolution_OXPHOS_vsd_all.png"
+)
+
+res_glycolysis <- run_resolution_pathway(
+  glycolysis_genes,
+  "Glycolysis",
+  "Mean VST expression of Hallmark Glycolysis genes",
+  "/Users/chhugani/Desktop/Resolution_Glycolysis_vsd_all.png"
+)
+
+res_inflammatory <- run_resolution_pathway(
+  inflammatory_genes,
+  "Inflammatory Response",
+  "Mean VST expression of Hallmark inflammatory response genes",
+  "/Users/chhugani/Desktop/Resolution_Inflammatory_Response_vsd_all.png"
+)
+
+res_tnfa <- run_resolution_pathway(
+  tnfa_genes,
+  "TNFα/NFκB Signaling",
+  "Mean VST expression of Hallmark TNFα/NFκB genes",
+  "/Users/chhugani/Desktop/Resolution_TNFA_NFKB_vsd_all.png"
+)
+
+res_ifng <- run_resolution_pathway(
+  ifng_genes,
+  "IFNγ Response",
+  "Mean VST expression of Hallmark IFNγ response genes",
+  "/Users/chhugani/Desktop/Resolution_IFNG_vsd_all.png"
+)
+
+res_ros <- run_resolution_pathway(
+  ros_genes,
+  "Reactive Oxygen Species",
+  "Mean VST expression of Hallmark ROS pathway genes",
+  "/Users/chhugani/Desktop/Resolution_ROS_vsd_all.png"
+)
+
+res_complement <- run_resolution_pathway(
+  complement_genes,
+  "Complement",
+  "Mean VST expression of Hallmark complement genes",
+  "/Users/chhugani/Desktop/Resolution_Complement_vsd_all.png"
+)
+
+res_coagulation <- run_resolution_pathway(
+  coagulation_genes,
+  "Coagulation",
+  "Mean VST expression of Hallmark coagulation genes",
+  "/Users/chhugani/Desktop/Resolution_Coagulation_vsd_all.png"
+)
+```
+```{r}
+# Create table of pathway p-values
+
+pathway_pvals <- data.frame(
+  Pathway = c(
+    "OXPHOS",
+    "Glycolysis",
+    "Inflammatory Response",
+    "TNFA/NFKB Signaling",
+    "IFNG Response",
+    "Reactive Oxygen Species",
+    "Complement",
+    "Coagulation"
+  ),
+  p_value = c(
+    0.1143,
+    0.04072,
+    0.1894,
+    0.4105,
+    0.8413,
+    0.05576,
+    0.02328,
+    0.01442
+  )
+)
+
+# BH FDR correction
+pathway_pvals$FDR <- p.adjust(
+  pathway_pvals$p_value,
+  method = "BH"
+)
+
+# Sort by significance
+pathway_pvals <- pathway_pvals %>%
+  arrange(FDR)
+
+pathway_pvals
+```
+
+```{r}
+#Calculating Delta change between Day 3 and Day 1 across few pathways 
+# =========================
+# Group-level Day 1 -> Day 3 slopes
+# Uses ALL available Day 1 and Day 3 samples
+# Not paired patient analysis
+# =========================
+
+library(dplyr)
+library(tidyr)
+library(writexl)
+
+calculate_group_slope <- function(pathway_df, pathway_name) {
+  
+  group_summary <- pathway_df %>%
+    filter(Day %in% c("1", "3")) %>%
+    group_by(Status, Day) %>%
+    summarise(
+      n_samples = n(),
+      mean_vst = mean(Pathway_VST_Score, na.rm = TRUE),
+      median_vst = median(Pathway_VST_Score, na.rm = TRUE),
+      sd_vst = sd(Pathway_VST_Score, na.rm = TRUE),
+      se_vst = sd_vst / sqrt(n_samples),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      Day = as.character(Day)
+    )
+  
+  # Wide format for slope calculation
+  wide_summary <- group_summary %>%
+    select(Status, Day, n_samples, mean_vst, median_vst, se_vst) %>%
+    pivot_wider(
+      names_from = Day,
+      values_from = c(n_samples, mean_vst, median_vst, se_vst),
+      names_sep = "_Day"
+    ) %>%
+    mutate(
+      Pathway = pathway_name,
+      
+      # Change in group mean from Day 1 to Day 3
+      Delta_mean_VST = mean_vst_Day3 - mean_vst_Day1,
+      
+      # Change per day; Day 3 - Day 1 = 2 days
+      Slope_per_day = Delta_mean_VST / 2,
+      
+      # Median change as a sensitivity metric
+      Delta_median_VST = median_vst_Day3 - median_vst_Day1
+    ) %>%
+    select(
+      Pathway,
+      Status,
+      n_Day1 = n_samples_Day1,
+      n_Day3 = n_samples_Day3,
+      mean_Day1 = mean_vst_Day1,
+      mean_Day3 = mean_vst_Day3,
+      Delta_mean_VST,
+      Slope_per_day,
+      median_Day1 = median_vst_Day1,
+      median_Day3 = median_vst_Day3,
+      Delta_median_VST,
+      se_Day1 = se_vst_Day1,
+      se_Day3 = se_vst_Day3
+    )
+  
+  return(wide_summary)
+}
+
+# =========================
+# Run group-level slope table for all pathways
+# =========================
+
+group_slope_results <- bind_rows(
+  calculate_group_slope(oxphos_scores_full, "OXPHOS"),
+  calculate_group_slope(glycolysis_scores_full, "Glycolysis"),
+  calculate_group_slope(inflammatory_scores_full, "Inflammatory Response"),
+  calculate_group_slope(tnfa_scores_full, "TNFA/NFKB Signaling"),
+  calculate_group_slope(ifng_scores_full, "IFNG Response"),
+  calculate_group_slope(ros_scores_full, "Reactive Oxygen Species"),
+  calculate_group_slope(complement_scores_full, "Complement"),
+  calculate_group_slope(coagulation_scores_full, "Coagulation")
+) %>%
+  mutate(
+    mean_Day1 = round(mean_Day1, 4),
+    mean_Day3 = round(mean_Day3, 4),
+    Delta_mean_VST = round(Delta_mean_VST, 4),
+    Slope_per_day = round(Slope_per_day, 4),
+    median_Day1 = round(median_Day1, 4),
+    median_Day3 = round(median_Day3, 4),
+    Delta_median_VST = round(Delta_median_VST, 4),
+    se_Day1 = round(se_Day1, 4),
+    se_Day3 = round(se_Day3, 4)
+  )
+
+group_slope_results
+
+write_xlsx(
+  group_slope_results,
+  "/Users/chhugani/Desktop/Group_Level_Day1_Day3_Pathway_Slopes.xlsx"
+)
+
+```
+
+
+```{r}
+library(dplyr)
+
+calculate_day_wilcox <- function(pathway_df, pathway_name) {
+  
+  results <- pathway_df %>%
+    filter(Day %in% c("1", "3")) %>%
+    group_by(Day) %>%
+    group_modify(~ {
+      
+      test <- wilcox.test(
+        Pathway_VST_Score ~ Status,
+        data = .x,
+        exact = FALSE
+      )
+      
+      summary <- .x %>%
+        group_by(Status) %>%
+        summarize(
+          n = n(),
+          mean_VST = mean(Pathway_VST_Score, na.rm = TRUE),
+          median_VST = median(Pathway_VST_Score, na.rm = TRUE),
+          .groups = "drop"
+        )
+      
+      data.frame(
+        Persistent_n = summary$n[summary$Status == "Persistent"],
+        Persistent_mean = summary$mean_VST[summary$Status == "Persistent"],
+        Persistent_median = summary$median_VST[summary$Status == "Persistent"],
+        
+        Resolving_n = summary$n[summary$Status == "Resolving"],
+        Resolving_mean = summary$mean_VST[summary$Status == "Resolving"],
+        Resolving_median = summary$median_VST[summary$Status == "Resolving"],
+        
+        Wilcoxon_p = test$p.value
+      )
+    }) %>%
+    mutate(
+      Pathway = pathway_name
+    ) %>%
+    select(
+      Pathway,
+      Day,
+      Persistent_n,
+      Persistent_mean,
+      Persistent_median,
+      Resolving_n,
+      Resolving_mean,
+      Resolving_median,
+      Wilcoxon_p
+    )
+  
+  return(results)
+}
+
+
+day_comparison_results <- bind_rows(
+  calculate_day_wilcox(oxphos_scores_full, "OXPHOS"),
+  calculate_day_wilcox(glycolysis_scores_full, "Glycolysis"),
+  calculate_day_wilcox(inflammatory_scores_full, "Inflammatory Response"),
+  calculate_day_wilcox(tnfa_scores_full, "TNFA/NFKB Signaling"),
+  calculate_day_wilcox(ifng_scores_full, "IFNG Response"),
+  calculate_day_wilcox(ros_scores_full, "Reactive Oxygen Species"),
+  calculate_day_wilcox(complement_scores_full, "Complement"),
+  calculate_day_wilcox(coagulation_scores_full, "Coagulation")
+)
+
+write.csv(
+  day_comparison_results,
+  "/Users/chhugani/Desktop/Day1_Day3_Wilcoxon_Pathway_Comparison.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+#DeSeq2 Wald Test on full dataset 
+library(dplyr)
+
+pathway_annotation <- bind_rows(
+  data.frame(Gene = oxphos_genes,
+             Pathway = "OXPHOS"),
+  
+  data.frame(Gene = glycolysis_genes,
+             Pathway = "Glycolysis"),
+  
+  data.frame(Gene = inflammatory_genes,
+             Pathway = "Inflammatory Response"),
+  
+  data.frame(Gene = tnfa_genes,
+             Pathway = "TNFA/NFKB Signaling"),
+  
+  data.frame(Gene = ifng_genes,
+             Pathway = "IFNG Response"),
+  
+  data.frame(Gene = ros_genes,
+             Pathway = "Reactive Oxygen Species"),
+  
+  data.frame(Gene = complement_genes,
+             Pathway = "Complement"),
+  
+  data.frame(Gene = coagulation_genes,
+             Pathway = "Coagulation")
+)
+
+# Remove duplicates
+pathway_annotation <- pathway_annotation %>%
+  distinct()
+
+# Check
+pathway_annotation %>%
+  count(Pathway)
+
+```
+```{r}
+# =========================
+# Gene-level DESeq2 pathway extraction
+# Comparison 1: Day 1 Persistent vs Resolving
+# =========================
+
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(writexl)
+
+# =========================
+# 1) Create pathway annotation table
+# =========================
+
+pathway_annotation <- bind_rows(
+  data.frame(Gene = oxphos_genes, Pathway = "OXPHOS"),
+  data.frame(Gene = glycolysis_genes, Pathway = "Glycolysis"),
+  data.frame(Gene = inflammatory_genes, Pathway = "Inflammatory Response"),
+  data.frame(Gene = tnfa_genes, Pathway = "TNFA/NFKB Signaling"),
+  data.frame(Gene = ifng_genes, Pathway = "IFNG Response"),
+  data.frame(Gene = ros_genes, Pathway = "Reactive Oxygen Species"),
+  data.frame(Gene = complement_genes, Pathway = "Complement"),
+  data.frame(Gene = coagulation_genes, Pathway = "Coagulation")
+) %>%
+  distinct()
+
+pathway_annotation %>%
+  count(Pathway)
+
+# =========================
+# 2) Day 1 subset
+# =========================
+
+coldata_day1 <- coldata_deseq %>%
+  filter(Day == "1")
+
+cts_day1 <- cts_deseq[, coldata_day1$Sample, drop = FALSE]
+
+stopifnot(identical(colnames(cts_day1), coldata_day1$Sample))
+
+rownames(coldata_day1) <- coldata_day1$Sample
+
+cat("Day 1 samples:\n")
+print(table(coldata_day1$Status))
+
+# =========================
+# 3) DESeq2 object for Day 1
+# =========================
+
+coldata_day1$Status <- factor(
+  coldata_day1$Status,
+  levels = c("Resolving", "Persistent")
+)
+
+dds_day1 <- DESeqDataSetFromMatrix(
+  countData = as.matrix(cts_day1),
+  colData = coldata_day1,
+  design = ~ Status
+)
+
+# Filter low-count genes
+keep <- rowSums(counts(dds_day1) >= 10) >= 3
+dds_day1 <- dds_day1[keep, ]
+
+cat("Day 1 DESeq2 dimensions after filtering:\n")
+print(dim(dds_day1))
+
+# Run DESeq2
+dds_day1 <- DESeq(dds_day1)
+
+# Persistent vs Resolving
+res_day1 <- results(
+  dds_day1,
+  contrast = c("Status", "Persistent", "Resolving")
+)
+
+day1_full <- as.data.frame(res_day1) %>%
+  rownames_to_column("Gene") %>%
+  mutate(
+    Gene_clean = sub("\\.\\d+$", "", Gene),
+    Comparison = "Day1_Persistent_vs_Resolving",
+    Direction = case_when(
+      log2FoldChange > 0 ~ "Higher in Persistent",
+      log2FoldChange < 0 ~ "Higher in Resolving",
+      TRUE ~ "No change"
+    )
+  )
+
+# =========================
+# 4) Extract pathway genes only
+# =========================
+
+day1_pathway_results <- day1_full %>%
+  inner_join(
+    pathway_annotation,
+    by = c("Gene_clean" = "Gene")
+  ) %>%
+  arrange(pvalue)
+
+# =========================
+# 5) Summary counts
+# =========================
+
+cat("Total pathway rows extracted:", nrow(day1_pathway_results), "\n")
+
+day1_pathway_results %>%
+  filter(!is.na(pvalue), pvalue < 0.05) %>%
+  count(Pathway, Direction) %>%
+  arrange(Pathway, Direction)
+
+cat("Nominal p < 0.05 pathway genes:",
+    sum(day1_pathway_results$pvalue < 0.05, na.rm = TRUE), "\n")
+
+cat("padj < 0.05 pathway genes:",
+    sum(day1_pathway_results$padj < 0.05, na.rm = TRUE), "\n")
+
+# =========================
+# 6) Save Day 1 results
+# =========================
+
+write_xlsx(
+  list(
+    Day1_All_Pathway_Genes = day1_pathway_results,
+    Day1_Nominal_p05 = day1_pathway_results %>%
+      filter(!is.na(pvalue), pvalue < 0.05),
+    Pathway_Annotation = pathway_annotation
+  ),
+  "/Users/chhugani/Desktop/Day1_Pathway_DESeq2_Results.xlsx"
+)
+```
+
+```{r}
+# =========================
+# Day 3 Persistent vs Resolving DESeq2
+# =========================
+
+# 1) Subset Day 3 samples
+
+coldata_day3 <- coldata_deseq %>%
+  filter(Day == "3")
+
+cts_day3 <- cts_deseq[, coldata_day3$Sample, drop = FALSE]
+
+stopifnot(identical(colnames(cts_day3), coldata_day3$Sample))
+
+rownames(coldata_day3) <- coldata_day3$Sample
+
+
+cat("Day 3 samples:\n")
+print(table(coldata_day3$Status))
+
+
+# =========================
+# 2) Create DESeq2 object
+# =========================
+
+coldata_day3$Status <- factor(
+  coldata_day3$Status,
+  levels = c("Resolving", "Persistent")
+)
+
+
+dds_day3 <- DESeqDataSetFromMatrix(
+  countData = as.matrix(cts_day3),
+  colData = coldata_day3,
+  design = ~ Status
+)
+
+
+# Filter low-count genes
+
+keep <- rowSums(counts(dds_day3) >= 10) >= 3
+
+dds_day3 <- dds_day3[keep, ]
+
+
+cat("Day 3 DESeq2 dimensions after filtering:\n")
+print(dim(dds_day3))
+
+
+# =========================
+# 3) Run DESeq2
+# =========================
+
+dds_day3 <- DESeq(dds_day3)
+
+
+# Persistent vs Resolving
+
+res_day3 <- results(
+  dds_day3,
+  contrast = c("Status", "Persistent", "Resolving")
+)
+
+
+# Convert to dataframe
+
+day3_full <- as.data.frame(res_day3) %>%
+  rownames_to_column("Gene") %>%
+  mutate(
+    Gene_clean = sub("\\.\\d+$", "", Gene),
+    Comparison = "Day3_Persistent_vs_Resolving",
+    
+    Direction = case_when(
+      log2FoldChange > 0 ~ "Higher in Persistent",
+      log2FoldChange < 0 ~ "Higher in Resolving",
+      TRUE ~ "No change"
+    )
+  )
+
+
+# =========================
+# 4) Extract pathway genes
+# =========================
+
+day3_pathway_results <- day3_full %>%
+  inner_join(
+    pathway_annotation,
+    by = c("Gene_clean" = "Gene")
+  ) %>%
+  arrange(pvalue)
+
+
+# =========================
+# 5) Summary statistics
+# =========================
+
+cat(
+  "Total pathway rows extracted:",
+  nrow(day3_pathway_results),
+  "\n"
+)
+
+
+cat(
+  "Nominal p < 0.05 pathway genes:",
+  sum(day3_pathway_results$pvalue < 0.05, na.rm = TRUE),
+  "\n"
+)
+
+
+cat(
+  "padj < 0.05 pathway genes:",
+  sum(day3_pathway_results$padj < 0.05, na.rm = TRUE),
+  "\n"
+)
+
+
+# Distribution by pathway and direction
+
+day3_pathway_results %>%
+  filter(!is.na(pvalue), pvalue < 0.05) %>%
+  count(Pathway, Direction) %>%
+  arrange(desc(n))
+
+
+# =========================
+# 6) Save results
+# =========================
+
+write_xlsx(
+  list(
+    Day3_All_Pathway_Genes = day3_pathway_results,
+    
+    Day3_Nominal_p05 = day3_pathway_results %>%
+      filter(!is.na(pvalue), pvalue < 0.05)
+  ),
+  
+  "/Users/chhugani/Desktop/Day3_Pathway_DESeq2_Results.xlsx"
+)
+```
+```{r}
+# =========================
+# Resolution-state DESeq2
+# Persistent_Resolution vs Resolving_cleared
+# Extract pathway genes from all 8 Hallmark pathways
+# =========================
+
+library(readxl)
+library(DESeq2)
+library(dplyr)
+library(tibble)
+library(writexl)
+
+# =========================
+# 1) Read resolution table
+# =========================
+
+resolution_path <- "/Users/chhugani/Desktop/Resolution_table.xlsx"
+
+resolution_table <- read_excel(resolution_path)
+
+resolution_table_clean <- resolution_table %>%
+  filter(Include_in_Resolution_Analysis == "Yes") %>%
+  mutate(
+    Resolution_Sample_Name = clean_sample_id(Resolution_Sample_Name),
+    Resolution_Group = factor(
+      Resolution_Group,
+      levels = c("Resolving_cleared", "Persistent_Resolution")
+    )
+  )
+
+resolution_table_clean %>%
+  count(Resolution_Group)
+
+# =========================
+# 2) Match resolution samples to full count matrix
+# =========================
+
+resolution_samples <- resolution_table_clean$Resolution_Sample_Name
+
+matched_resolution_samples <- intersect(
+  resolution_samples,
+  colnames(cts_matched)
+)
+
+missing_resolution_samples <- setdiff(
+  resolution_samples,
+  colnames(cts_matched)
+)
+
+cat("Resolution samples in table:", length(resolution_samples), "\n")
+cat("Matched resolution samples:", length(matched_resolution_samples), "\n")
+cat("Missing resolution samples:", length(missing_resolution_samples), "\n")
+
+missing_resolution_samples
+
+resolution_table_matched <- resolution_table_clean %>%
+  filter(Resolution_Sample_Name %in% matched_resolution_samples)
+
+resolution_table_matched %>%
+  count(Resolution_Group)
+
+# =========================
+# 3) Build resolution count matrix and metadata
+# =========================
+
+cts_resolution <- cts_matched[, resolution_table_matched$Resolution_Sample_Name, drop = FALSE]
+
+coldata_resolution <- resolution_table_matched %>%
+  dplyr::select(
+    Resolution_Sample_Name,
+    Resolution_Group
+  ) %>%
+  as.data.frame()
+
+rownames(coldata_resolution) <- coldata_resolution$Resolution_Sample_Name
+
+stopifnot(
+  identical(
+    colnames(cts_resolution),
+    rownames(coldata_resolution)
+  )
+)
+
+coldata_resolution$Resolution_Group <- factor(
+  coldata_resolution$Resolution_Group,
+  levels = c("Resolving_cleared", "Persistent_Resolution")
+)
+
+cat("Resolution DESeq2 sample groups:\n")
+print(table(coldata_resolution$Resolution_Group))
+
+# =========================
+# 4) Create DESeq2 object
+# =========================
+
+dds_resolution <- DESeqDataSetFromMatrix(
+  countData = as.matrix(cts_resolution),
+  colData = coldata_resolution,
+  design = ~ Resolution_Group
+)
+
+keep <- rowSums(counts(dds_resolution) >= 10) >= 3
+dds_resolution <- dds_resolution[keep, ]
+
+cat("Resolution DESeq2 dimensions after filtering:\n")
+print(dim(dds_resolution))
+
+dds_resolution <- DESeq(dds_resolution)
+
+# Persistent_Resolution vs Resolving_cleared
+res_resolution <- results(
+  dds_resolution,
+  contrast = c(
+    "Resolution_Group",
+    "Persistent_Resolution",
+    "Resolving_cleared"
+  )
+)
+
+resolution_full <- as.data.frame(res_resolution) %>%
+  rownames_to_column("Gene") %>%
+  mutate(
+    Gene_clean = sub("\\.\\d+$", "", Gene),
+    Comparison = "Persistent_Resolution_vs_Resolving_cleared",
+    Direction = case_when(
+      log2FoldChange > 0 ~ "Higher in Persistent_Resolution",
+      log2FoldChange < 0 ~ "Higher in Resolving_cleared",
+      TRUE ~ "No change"
+    )
+  )
+
+# =========================
+# 5) Extract pathway genes
+# =========================
+
+resolution_pathway_results <- resolution_full %>%
+  inner_join(
+    pathway_annotation,
+    by = c("Gene_clean" = "Gene")
+  ) %>%
+  arrange(pvalue)
+
+cat("Total pathway rows extracted:", nrow(resolution_pathway_results), "\n")
+
+cat(
+  "Nominal p < 0.05 pathway genes:",
+  sum(resolution_pathway_results$pvalue < 0.05, na.rm = TRUE),
+  "\n"
+)
+
+cat(
+  "padj < 0.05 pathway genes:",
+  sum(resolution_pathway_results$padj < 0.05, na.rm = TRUE),
+  "\n"
+)
+
+# =========================
+# 6) Summary counts
+# =========================
+
+resolution_pathway_results %>%
+  filter(!is.na(pvalue), pvalue < 0.05) %>%
+  count(Pathway, Direction) %>%
+  arrange(desc(n))
+
+# =========================
+# 7) FDR-significant pathway genes
+# =========================
+
+resolution_pathway_results %>%
+  filter(!is.na(padj), padj < 0.05) %>%
+  arrange(padj) %>%
+  dplyr::select(
+    Gene_clean,
+    Pathway,
+    log2FoldChange,
+    pvalue,
+    padj,
+    Direction
+  )
+
+# =========================
+# 8) Save results
+# =========================
+
+write_xlsx(
+  list(
+    Resolution_All_Pathway_Genes = resolution_pathway_results,
+    Resolution_Nominal_p05 = resolution_pathway_results %>%
+      filter(!is.na(pvalue), pvalue < 0.05),
+    Resolution_FDR_padj05 = resolution_pathway_results %>%
+      filter(!is.na(padj), padj < 0.05)
+  ),
+  "/Users/chhugani/Desktop/Resolution_Pathway_DESeq2_Results.xlsx"
+)
+```
+
+```{r}
+# =========================
+# GSVA + limma pathway analysis
+# Hallmark pathways: 8 selected pathways
+# =========================
+
+library(dplyr)
+library(tibble)
+library(GSVA)
+library(limma)
+library(readxl)
+library(writexl)
+
+# =========================
+# 1) Define pathway list
+# =========================
+
+pathway_list <- list(
+  OXPHOS = oxphos_genes,
+  Glycolysis = glycolysis_genes,
+  Inflammatory_Response = inflammatory_genes,
+  TNFA_NFKB = tnfa_genes,
+  IFNG_Response = ifng_genes,
+  Reactive_Oxygen_Species = ros_genes,
+  Complement = complement_genes,
+  Coagulation = coagulation_genes
+)
+
+# =========================
+# Function: GSVA + limma
+# Compatible with GSVA v2.4.4
+# =========================
+
+run_gsva_limma <- function(vst_mat,
+                           metadata,
+                           group_col,
+                           group_ref,
+                           group_test,
+                           comparison_name) {
+  
+  library(GSVA)
+  library(limma)
+  library(dplyr)
+  library(tibble)
+  
+  # -------------------------
+  # Clean gene names
+  # -------------------------
+  
+  rownames(vst_mat) <- sub("\\.\\d+$", "", rownames(vst_mat))
+  
+  # Remove duplicate genes
+  vst_mat <- vst_mat[!duplicated(rownames(vst_mat)), ]
+  
+  # -------------------------
+  # Match pathway genes
+  # -------------------------
+  
+  pathway_list_present <- lapply(
+    pathway_list,
+    function(x) intersect(x, rownames(vst_mat))
+  )
+  
+  cat("\nGenes found per pathway:\n")
+  print(sapply(pathway_list_present, length))
+  
+  
+  # -------------------------
+  # GSVA (new syntax)
+  # -------------------------
+  
+  gsva_params <- gsvaParam(
+    exprData = vst_mat,
+    geneSets = pathway_list_present,
+    kcdf = "Gaussian",
+    maxDiff = TRUE
+  )
+  
+  gsva_scores <- gsva(
+    gsva_params,
+    verbose = FALSE
+  )
+  
+  
+  # -------------------------
+  # Prepare metadata
+  # -------------------------
+  
+  metadata <- as.data.frame(metadata)
+  
+  metadata[[group_col]] <- factor(
+    metadata[[group_col]],
+    levels = c(group_ref, group_test)
+  )
+  
+  metadata <- metadata[colnames(gsva_scores), , drop = FALSE]
+  
+  stopifnot(
+    identical(
+      colnames(gsva_scores),
+      rownames(metadata)
+    )
+  )
+  
+  
+  # -------------------------
+  # limma model
+  # -------------------------
+  
+  design <- model.matrix(
+    as.formula(
+      paste0("~0 + ", group_col)
+    ),
+    data = metadata
+  )
+  
+  colnames(design) <- levels(metadata[[group_col]])
+  
+  
+  fit <- lmFit(gsva_scores, design)
+  
+  
+  contrast_matrix <- makeContrasts(
+    contrasts = paste0(group_test, "-", group_ref),
+    levels = design
+  )
+  
+  
+  fit2 <- contrasts.fit(
+    fit,
+    contrast_matrix
+  )
+  
+  fit2 <- eBayes(fit2)
+  
+  
+  # -------------------------
+  # Extract results
+  # -------------------------
+  
+  results <- topTable(
+    fit2,
+    number = Inf,
+    adjust.method = "BH"
+  ) %>%
+    rownames_to_column("Pathway") %>%
+    mutate(
+      Comparison = comparison_name,
+      Direction = case_when(
+        logFC > 0 ~ paste("Higher in", group_test),
+        logFC < 0 ~ paste("Higher in", group_ref),
+        TRUE ~ "No change"
+      )
+    ) %>%
+    select(
+      Comparison,
+      Pathway,
+      logFC,
+      AveExpr,
+      t,
+      P.Value,
+      adj.P.Val,
+      B,
+      Direction
+    )
+  
+  
+  return(
+    list(
+      gsva_scores = gsva_scores,
+      results = results
+    )
+  )
+}
+
+# =========================
+# Day 3 GSVA/limma
+# =========================
+
+meta_day3 <- coldata_deseq %>%
+  filter(Day == "3") %>%
+  as.data.frame()
+
+rownames(meta_day3) <- meta_day3$Sample
+
+vst_day3 <- assay(vsd_full)[, meta_day3$Sample, drop = FALSE]
+
+day3_gsva <- run_gsva_limma(
+  vst_mat = vst_day3,
+  metadata = meta_day3,
+  group_col = "Status",
+  group_ref = "Resolving",
+  group_test = "Persistent",
+  comparison_name = "Day3_Persistent_vs_Resolving"
+)
+
+day3_gsva$results
+
+```
+
+```{r}
+# =========================
+# Day 1 Persistent vs Resolving
+# =========================
+
+meta_day1 <- coldata_deseq %>%
+  filter(Day == "1") %>%
+  as.data.frame()
+
+rownames(meta_day1) <- meta_day1$Sample
+
+vst_day1 <- assay(vsd_full)[, meta_day1$Sample, drop = FALSE]
+
+day1_gsva <- run_gsva_limma(
+  vst_mat = vst_day1,
+  metadata = meta_day1,
+  group_col = "Status",
+  group_ref = "Resolving",
+  group_test = "Persistent",
+  comparison_name = "Day1_Persistent_vs_Resolving"
+)
+
+day1_gsva$results
+```
+
+```{r}
+# =========================
+# Resolution Persistent_Resolution
+# vs Resolving_cleared
+# =========================
+
+library(readxl)
+library(dplyr)
+
+resolution_path <- "/Users/chhugani/Desktop/Resolution_table.xlsx"
+
+resolution_table <- read_excel(resolution_path)
+
+resolution_table_clean <- resolution_table %>%
+  filter(Include_in_Resolution_Analysis == "Yes") %>%
+  mutate(
+    Resolution_Sample_Name = clean_sample_id(Resolution_Sample_Name),
+    Resolution_Group = factor(
+      Resolution_Group,
+      levels = c("Resolving_cleared", "Persistent_Resolution")
+    )
+  )
+
+meta_resolution <- resolution_table_clean %>%
+  dplyr::select(
+    Sample = Resolution_Sample_Name,
+    Resolution_Group
+  ) %>%
+  as.data.frame()
+
+rownames(meta_resolution) <- meta_resolution$Sample
+
+vst_resolution <- assay(vsd_all)[, meta_resolution$Sample, drop = FALSE]
+
+stopifnot(identical(colnames(vst_resolution), rownames(meta_resolution)))
+
+table(meta_resolution$Resolution_Group)
+
+
+resolution_gsva <- run_gsva_limma(
+  vst_mat = vst_resolution,
+  metadata = meta_resolution,
+  group_col = "Resolution_Group",
+  group_ref = "Resolving_cleared",
+  group_test = "Persistent_Resolution",
+  comparison_name = "Persistent_Resolution_vs_Resolving_cleared"
+)
+
+resolution_gsva$results
+
+
+```
+```{r}
+library(dplyr)
+
+# -----------------------------
+# Day 1 significant genes
+# -----------------------------
+
+d1_sig <- day1_pathway_results %>%
+  select(
+    Gene_clean,
+    Pathway,
+    log2FC_D1 = log2FoldChange,
+    p_D1 = pvalue,
+    padj_D1 = padj,
+    Direction_D1 = Direction
+  ) %>%
+  filter(p_D1 < 0.05)
+
+
+# -----------------------------
+# Day 3 significant genes
+# -----------------------------
+
+d3_sig <- day3_pathway_results %>%
+  select(
+    Gene_clean,
+    Pathway,
+    log2FC_D3 = log2FoldChange,
+    p_D3 = pvalue,
+    padj_D3 = padj,
+    Direction_D3 = Direction
+  ) %>%
+  filter(p_D3 < 0.05)
+
+
+# -----------------------------
+# Find overlapping genes
+# -----------------------------
+
+day1_day3_overlap <- d1_sig %>%
+  inner_join(
+    d3_sig,
+    by = c("Gene_clean", "Pathway")
+  ) %>%
+  filter(
+    Direction_D1 == Direction_D3
+  ) %>%
+  arrange(p_D3)
+
+
+# View results
+day1_day3_overlap
+
+
+# Number of genes
+nrow(day1_day3_overlap)
+
+
+# Which pathways are represented?
+day1_day3_overlap %>%
+  count(Pathway, Direction_D3)
+```
+
+```{r}
+day1_day3_overlap %>%
+  arrange(p_D3) %>%
+  select(
+    Gene_clean,
+    Pathway,
+    log2FC_D1,
+    p_D1,
+    padj_D1,
+    log2FC_D3,
+    p_D3,
+    padj_D3,
+    Direction_D3
+  )
+```
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(stringr)
+library(openxlsx)
+
+# -----------------------------
+# 1. Combine all nominal p < 0.05 Hallmark results
+# -----------------------------
+
+all_hallmark <- bind_rows(
+  day1_nominal %>%
+    mutate(Timepoint = "Day 1"),
+  day3_nominal %>%
+    mutate(Timepoint = "Day 3"),
+  resolution_nominal %>%
+    mutate(Timepoint = "Resolution")
+) %>%
+  distinct(Gene_clean, Pathway, Direction, Timepoint)
+
+# Check counts match prior table
+all_hallmark %>%
+  count(Timepoint, Direction)
+
+all_hallmark %>%
+  count(Timepoint, Pathway)
+
+
+# -----------------------------
+# 2. Function to calculate overlap summary
+# -----------------------------
+
+calculate_overlap <- function(df, direction_label) {
+  
+  df_dir <- df %>%
+    filter(Direction == direction_label) %>%
+    distinct(Pathway, Timepoint, Gene_clean)
+  
+  pathway_list <- sort(unique(df_dir$Pathway))
+  
+  map_dfr(pathway_list, function(pw) {
+    
+    d <- df_dir %>% filter(Pathway == pw)
+    
+    genes_d1  <- d %>% filter(Timepoint == "Day 1") %>% pull(Gene_clean) %>% unique()
+    genes_d3  <- d %>% filter(Timepoint == "Day 3") %>% pull(Gene_clean) %>% unique()
+    genes_res <- d %>% filter(Timepoint == "Resolution") %>% pull(Gene_clean) %>% unique()
+    
+    total_unique <- unique(c(genes_d1, genes_d3, genes_res))
+    
+    shared_d1_d3  <- intersect(genes_d1, genes_d3)
+    shared_d1_res <- intersect(genes_d1, genes_res)
+    shared_d3_res <- intersect(genes_d3, genes_res)
+    shared_all3   <- Reduce(intersect, list(genes_d1, genes_d3, genes_res))
+    
+    unique_d1 <- setdiff(genes_d1, union(genes_d3, genes_res))
+    unique_d3 <- setdiff(genes_d3, union(genes_d1, genes_res))
+    unique_res <- setdiff(genes_res, union(genes_d1, genes_d3))
+    
+    tibble(
+      Direction = direction_label,
+      Pathway = pw,
+      Total_Unique_Genes = length(total_unique),
+      Shared_Day1_Day3 = length(shared_d1_d3),
+      Shared_Day1_Resolution = length(shared_d1_res),
+      Shared_Day3_Resolution = length(shared_d3_res),
+      Shared_All_3 = length(shared_all3),
+      Unique_Day1 = length(unique_d1),
+      Unique_Day3 = length(unique_d3),
+      Unique_Resolution = length(unique_res),
+      Shared_All_3_Genes = paste(sort(shared_all3), collapse = ", "),
+      Shared_Day1_Day3_Genes = paste(sort(shared_d1_d3), collapse = ", "),
+      Shared_Day1_Resolution_Genes = paste(sort(shared_d1_res), collapse = ", "),
+      Shared_Day3_Resolution_Genes = paste(sort(shared_d3_res), collapse = ", ")
+    )
+  })
+}
+
+
+# -----------------------------
+# 3. Run separately for Persistent and Resolving
+# -----------------------------
+
+persistent_overlap <- calculate_overlap(
+  all_hallmark,
+  "Higher in Persistent"
+)
+
+resolving_overlap <- calculate_overlap(
+  all_hallmark,
+  "Higher in Resolving"
+)
+
+overlap_summary <- bind_rows(
+  persistent_overlap,
+  resolving_overlap
+)
+
+
+# -----------------------------
+# 4. Cleaner count-only table for Annie
+# -----------------------------
+
+overlap_counts <- overlap_summary %>%
+  select(
+    Direction,
+    Pathway,
+    Total_Unique_Genes,
+    Shared_Day1_Day3,
+    Shared_Day1_Resolution,
+    Shared_Day3_Resolution,
+    Shared_All_3,
+    Unique_Day1,
+    Unique_Day3,
+    Unique_Resolution
+  )
+
+
+# -----------------------------
+# 5. Gene-list table for follow-up
+# -----------------------------
+
+overlap_gene_lists <- overlap_summary %>%
+  select(
+    Direction,
+    Pathway,
+    Shared_All_3_Genes,
+    Shared_Day1_Day3_Genes,
+    Shared_Day1_Resolution_Genes,
+    Shared_Day3_Resolution_Genes
+  )
+
+
+# -----------------------------
+# 6. Optional: make pattern table per gene
+# -----------------------------
+
+gene_pattern_table <- all_hallmark %>%
+  mutate(Present = 1) %>%
+  unite("Condition", Timepoint, Direction, sep = "_") %>%
+  distinct(Gene_clean, Pathway, Condition, Present) %>%
+  pivot_wider(
+    names_from = Condition,
+    values_from = Present,
+    values_fill = 0
+  ) %>%
+  arrange(Pathway, Gene_clean)
+
+
+# -----------------------------
+# 7. Export to Excel
+# -----------------------------
+
+write.xlsx(
+  list(
+    "Overlap_Counts" = overlap_counts,
+    "Overlap_Gene_Lists" = overlap_gene_lists,
+    "Gene_Pattern_Table" = gene_pattern_table
+  ),
+  file = "Hallmark_Pathway_Longitudinal_Overlap.xlsx",
+  overwrite = TRUE
+)
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(openxlsx)
+
+# 1. Combine nominal p < 0.05 Hallmark pathway results
+all_hallmark <- bind_rows(
+  day1_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Day 1"),
+  
+  day3_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Day 3"),
+  
+  resolution_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Resolution")
+) %>%
+  distinct(Gene_clean, Pathway, Direction, Timepoint)
+
+# 2. Confirm counts match your table
+all_hallmark %>% count(Timepoint)
+
+all_hallmark %>% count(Timepoint, Direction)
+
+all_hallmark %>% count(Timepoint, Pathway)
+
+# 3. Calculate overlap summary separately by Direction
+calculate_overlap <- function(df, direction_label) {
+  
+  df_dir <- df %>%
+    filter(Direction == direction_label) %>%
+    distinct(Pathway, Timepoint, Gene_clean)
+  
+  pathway_list <- sort(unique(df$Pathway))
+  
+  map_dfr(pathway_list, function(pw) {
+    
+    d <- df_dir %>% filter(Pathway == pw)
+    
+    genes_d1  <- d %>% filter(Timepoint == "Day 1") %>% pull(Gene_clean) %>% unique()
+    genes_d3  <- d %>% filter(Timepoint == "Day 3") %>% pull(Gene_clean) %>% unique()
+    genes_res <- d %>% filter(Timepoint == "Resolution") %>% pull(Gene_clean) %>% unique()
+    
+    total_unique <- unique(c(genes_d1, genes_d3, genes_res))
+    
+    shared_d1_d3  <- intersect(genes_d1, genes_d3)
+    shared_d1_res <- intersect(genes_d1, genes_res)
+    shared_d3_res <- intersect(genes_d3, genes_res)
+    shared_all3   <- Reduce(intersect, list(genes_d1, genes_d3, genes_res))
+    
+    unique_d1  <- setdiff(genes_d1, union(genes_d3, genes_res))
+    unique_d3  <- setdiff(genes_d3, union(genes_d1, genes_res))
+    unique_res <- setdiff(genes_res, union(genes_d1, genes_d3))
+    
+    tibble(
+      Direction = direction_label,
+      Pathway = pw,
+      Total_Unique_Genes = length(total_unique),
+      Day1_n = length(genes_d1),
+      Day3_n = length(genes_d3),
+      Resolution_n = length(genes_res),
+      Shared_Day1_Day3 = length(shared_d1_d3),
+      Shared_Day1_Resolution = length(shared_d1_res),
+      Shared_Day3_Resolution = length(shared_d3_res),
+      Shared_All_3 = length(shared_all3),
+      Unique_Day1 = length(unique_d1),
+      Unique_Day3 = length(unique_d3),
+      Unique_Resolution = length(unique_res),
+      Shared_All_3_Genes = paste(sort(shared_all3), collapse = ", "),
+      Shared_Day1_Day3_Genes = paste(sort(shared_d1_d3), collapse = ", "),
+      Shared_Day1_Resolution_Genes = paste(sort(shared_d1_res), collapse = ", "),
+      Shared_Day3_Resolution_Genes = paste(sort(shared_d3_res), collapse = ", ")
+    )
+  })
+}
+
+persistent_overlap <- calculate_overlap(all_hallmark, "Higher in Persistent")
+resolving_overlap  <- calculate_overlap(all_hallmark, "Higher in Resolving")
+
+overlap_summary <- bind_rows(persistent_overlap, resolving_overlap)
+
+# 4. Clean count table for Annie
+overlap_counts <- overlap_summary %>%
+  select(
+    Direction,
+    Pathway,
+    Total_Unique_Genes,
+    Day1_n,
+    Day3_n,
+    Resolution_n,
+    Shared_Day1_Day3,
+    Shared_Day1_Resolution,
+    Shared_Day3_Resolution,
+    Shared_All_3,
+    Unique_Day1,
+    Unique_Day3,
+    Unique_Resolution
+  )
+
+# 5. Gene-list table for recurring genes
+overlap_gene_lists <- overlap_summary %>%
+  select(
+    Direction,
+    Pathway,
+    Shared_All_3_Genes,
+    Shared_Day1_Day3_Genes,
+    Shared_Day1_Resolution_Genes,
+    Shared_Day3_Resolution_Genes
+  )
+
+# 6. Full gene presence/absence matrix
+gene_pattern_table <- all_hallmark %>%
+  mutate(Present = 1) %>%
+  unite("Condition", Timepoint, Direction, sep = "_") %>%
+  distinct(Gene_clean, Pathway, Condition, Present) %>%
+  pivot_wider(
+    names_from = Condition,
+    values_from = Present,
+    values_fill = 0
+  ) %>%
+  arrange(Pathway, Gene_clean)
+
+# 7. Export
+write.xlsx(
+  list(
+    "Overlap_Counts" = overlap_counts,
+    "Overlap_Gene_Lists" = overlap_gene_lists,
+    "Gene_Pattern_Table" = gene_pattern_table
+  ),
+  file = "/Users/chhugani/Desktop/Hallmark_Pathway_Longitudinal_Overlap.xlsx",
+  overwrite = TRUE
+)
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+
+calculate_transition <- function(df, direction_label,
+                                 tp1 = "Day 1",
+                                 tp2 = "Day 3") {
+
+  df_dir <- df %>%
+    filter(Direction == direction_label)
+
+  pathways <- sort(unique(df$Pathway))
+
+  map_dfr(pathways, function(pw){
+
+    g1 <- df_dir %>%
+      filter(Pathway == pw,
+             Timepoint == tp1) %>%
+      pull(Gene_clean) %>%
+      unique()
+
+    g2 <- df_dir %>%
+      filter(Pathway == pw,
+             Timepoint == tp2) %>%
+      pull(Gene_clean) %>%
+      unique()
+
+    shared <- intersect(g1, g2)
+
+    lost <- setdiff(g1, g2)
+
+    gained <- setdiff(g2, g1)
+
+    tibble(
+      Direction = direction_label,
+      Pathway = pw,
+
+      Genes_Time1 = length(g1),
+      Genes_Time2 = length(g2),
+
+      Shared = length(shared),
+      Lost = length(lost),
+      Gained = length(gained),
+
+      Percent_Time1_Retained =
+        round(100*length(shared)/max(length(g1),1),1),
+
+      Percent_Time2_New =
+        round(100*length(gained)/max(length(g2),1),1),
+
+      Shared_Genes = paste(shared, collapse=", ")
+    )
+
+  })
+
+}
+```
+
+
+```{r}
+persistent_D1_D3 <-
+  calculate_transition(
+    all_hallmark,
+    "Higher in Persistent",
+    "Day 1",
+    "Day 3"
+  )
+
+persistent_D3_Res <-
+  calculate_transition(
+    all_hallmark,
+    "Higher in Persistent",
+    "Day 3",
+    "Resolution"
+  )
+
+resolving_D1_D3 <-
+  calculate_transition(
+    all_hallmark,
+    "Higher in Resolving",
+    "Day 1",
+    "Day 3"
+  )
+
+resolving_D3_Res <-
+  calculate_transition(
+    all_hallmark,
+    "Higher in Resolving",
+    "Day 3",
+    "Resolution"
+  )
+```
+
+
+```{r}
+write.xlsx(
+list(
+Persistent_D1_D3=persistent_D1_D3,
+Persistent_D3_Resolution=persistent_D3_Res,
+Resolving_D1_D3=resolving_D1_D3,
+Resolving_D3_Resolution=resolving_D3_Res
+),
+"/Users/chhugani/Desktop/Hallmark_Pathway_Transitions.xlsx",
+overwrite=TRUE
+)
+```
+
+```{r}
+transition_table_one_sheet <- bind_rows(
+  persistent_D1_D3 %>%
+    mutate(Transition = "Day 1 → Day 3"),
+  persistent_D3_Res %>%
+    mutate(Transition = "Day 3 → Resolution"),
+  resolving_D1_D3 %>%
+    mutate(Transition = "Day 1 → Day 3"),
+  resolving_D3_Res %>%
+    mutate(Transition = "Day 3 → Resolution")
+) %>%
+  select(
+    Direction,
+    Transition,
+    Pathway,
+    Genes_Time1,
+    Genes_Time2,
+    Shared,
+    Lost,
+    Gained,
+    Percent_Time1_Retained,
+    Percent_Time2_New,
+    Shared_Genes
+  ) %>%
+  arrange(Direction, Transition, Pathway)
+
+write.xlsx(
+  transition_table_one_sheet,
+  file = "/Users/chhugani/Desktop/Hallmark_Pathway_Transition_OneSheet.xlsx",
+  overwrite = TRUE
+)
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+
+get_shared_genes <- function(df, direction,
+                             tp1,
+                             tp2){
+
+  df_dir <- df %>%
+    filter(Direction == direction)
+
+  pathways <- sort(unique(df$Pathway))
+
+  map_dfr(pathways, function(p){
+
+    genes1 <- df_dir %>%
+      filter(Pathway == p,
+             Timepoint == tp1) %>%
+      pull(Gene_clean) %>%
+      unique()
+
+    genes2 <- df_dir %>%
+      filter(Pathway == p,
+             Timepoint == tp2) %>%
+      pull(Gene_clean) %>%
+      unique()
+
+    shared <- intersect(genes1, genes2)
+
+    tibble(
+      Pathway = p,
+      Shared_n = length(shared),
+      Shared_Genes = ifelse(length(shared)==0,
+                            "-",
+                            paste(sort(shared), collapse = "; "))
+    )
+
+  })
+
+}
+```
+
+```{r}
+persistent_D1_D3 <-
+  get_shared_genes(
+    all_hallmark,
+    "Higher in Persistent",
+    "Day 1",
+    "Day 3"
+  )
+
+persistent_D3_Res <-
+  get_shared_genes(
+    all_hallmark,
+    "Higher in Persistent_Resolution",
+    "Day 3",
+    "Resolution"
+  )
+
+resolving_D1_D3 <-
+  get_shared_genes(
+    all_hallmark,
+    "Higher in Resolving",
+    "Day 1",
+    "Day 3"
+  )
+
+resolving_D3_Res <-
+  get_shared_genes(
+    all_hallmark,
+    "Higher in Resolving_cleared",
+    "Day 3",
+    "Resolution"
+  )
+```
+
+```{r}
+table2 <- persistent_D1_D3 %>%
+  rename(
+    Persistent_D1_D3_n = Shared_n,
+    Persistent_D1_D3_Genes = Shared_Genes
+  ) %>%
+  left_join(
+
+    persistent_D3_Res %>%
+      rename(
+        Persistent_D3_Res_n = Shared_n,
+        Persistent_D3_Res_Genes = Shared_Genes
+      ),
+
+    by="Pathway"
+
+  ) %>%
+  left_join(
+
+    resolving_D1_D3 %>%
+      rename(
+        Resolving_D1_D3_n = Shared_n,
+        Resolving_D1_D3_Genes = Shared_Genes
+      ),
+
+    by="Pathway"
+
+  ) %>%
+  left_join(
+
+    resolving_D3_Res %>%
+      rename(
+        Resolving_D3_Res_n = Shared_n,
+        Resolving_D3_Res_Genes = Shared_Genes
+      ),
+
+    by="Pathway"
+
+  )
+```
+
+```{r}
+library(openxlsx)
+
+write.xlsx(
+  table2,
+  file = "/Users/chhugani/Desktop/Hallmark_Shared_Genes_Table.xlsx",
+  overwrite = TRUE
+)
+
+table2
+```
+```{r}
+library(dplyr)
+library(purrr)
+library(stringr)
+library(openxlsx)
+
+#------------------------------------------------------------
+# 1. Combine nominal p < 0.05 Hallmark pathway results
+#------------------------------------------------------------
+
+all_hallmark <- bind_rows(
+  day1_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Day 1"),
+  
+  day3_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Day 3"),
+  
+  resolution_pathway_results %>%
+    filter(pvalue < 0.05) %>%
+    mutate(Timepoint = "Resolution")
+) %>%
+  distinct(Gene_clean, Pathway, Direction, Timepoint)
+
+# Quick checks
+all_hallmark %>% count(Timepoint)
+all_hallmark %>% count(Timepoint, Direction)
+
+
+#------------------------------------------------------------
+# 2. Function for shared genes between adjacent phases
+#------------------------------------------------------------
+
+get_transition_shared <- function(df,
+                                  direction_time1,
+                                  direction_time2,
+                                  transition_label,
+                                  timepoint1,
+                                  timepoint2,
+                                  output_direction_label) {
+  
+  pathways <- sort(unique(df$Pathway))
+  
+  map_dfr(pathways, function(pw) {
+    
+    genes_t1 <- df %>%
+      filter(
+        Pathway == pw,
+        Timepoint == timepoint1,
+        Direction == direction_time1
+      ) %>%
+      pull(Gene_clean) %>%
+      unique()
+    
+    genes_t2 <- df %>%
+      filter(
+        Pathway == pw,
+        Timepoint == timepoint2,
+        Direction == direction_time2
+      ) %>%
+      pull(Gene_clean) %>%
+      unique()
+    
+    shared_genes <- intersect(genes_t1, genes_t2)
+    
+    tibble(
+      Pathway = pw,
+      Direction = output_direction_label,
+      Transition = transition_label,
+      Genes_Time1 = length(genes_t1),
+      Genes_Time2 = length(genes_t2),
+      Shared = length(shared_genes),
+      Shared_Genes = ifelse(
+        length(shared_genes) == 0,
+        "—",
+        paste(sort(shared_genes), collapse = "; ")
+      )
+    )
+  })
+}
+
+
+#------------------------------------------------------------
+# 3. Run all four transitions with correct direction labels
+#------------------------------------------------------------
+
+persistent_D1_D3 <- get_transition_shared(
+  df = all_hallmark,
+  direction_time1 = "Higher in Persistent",
+  direction_time2 = "Higher in Persistent",
+  transition_label = "Day 1 → Day 3",
+  timepoint1 = "Day 1",
+  timepoint2 = "Day 3",
+  output_direction_label = "Persistent"
+)
+
+persistent_D3_Res <- get_transition_shared(
+  df = all_hallmark,
+  direction_time1 = "Higher in Persistent",
+  direction_time2 = "Higher in Persistent_Resolution",
+  transition_label = "Day 3 → Resolution",
+  timepoint1 = "Day 3",
+  timepoint2 = "Resolution",
+  output_direction_label = "Persistent"
+)
+
+resolving_D1_D3 <- get_transition_shared(
+  df = all_hallmark,
+  direction_time1 = "Higher in Resolving",
+  direction_time2 = "Higher in Resolving",
+  transition_label = "Day 1 → Day 3",
+  timepoint1 = "Day 1",
+  timepoint2 = "Day 3",
+  output_direction_label = "Resolving"
+)
+
+resolving_D3_Res <- get_transition_shared(
+  df = all_hallmark,
+  direction_time1 = "Higher in Resolving",
+  direction_time2 = "Higher in Resolving_cleared",
+  transition_label = "Day 3 → Resolution",
+  timepoint1 = "Day 3",
+  timepoint2 = "Resolution",
+  output_direction_label = "Resolving"
+)
+
+
+#------------------------------------------------------------
+# 4. Combine and clean table
+#------------------------------------------------------------
+
+transition_table_one_sheet <- bind_rows(
+  persistent_D1_D3,
+  persistent_D3_Res,
+  resolving_D1_D3,
+  resolving_D3_Res
+)
+
+clean_transition_table <- transition_table_one_sheet %>%
+  mutate(
+    `Day 1` = ifelse(
+      Transition == "Day 1 → Day 3",
+      Genes_Time1,
+      NA
+    ),
+    
+    `Day 3` = ifelse(
+      Transition == "Day 1 → Day 3",
+      Genes_Time2,
+      Genes_Time1
+    ),
+    
+    Resolution = ifelse(
+      Transition == "Day 3 → Resolution",
+      Genes_Time2,
+      NA
+    )
+  ) %>%
+  select(
+    Pathway,
+    Direction,
+    Transition,
+    `Day 1`,
+    `Day 3`,
+    Resolution,
+    `Shared (n)` = Shared,
+    `Gene Symbols` = Shared_Genes
+  ) %>%
+  arrange(
+    Pathway,
+    factor(Direction, levels = c("Persistent", "Resolving")),
+    factor(Transition, levels = c("Day 1 → Day 3", "Day 3 → Resolution"))
+  ) %>%
+  mutate(
+    `Day 1` = ifelse(is.na(`Day 1`), "—", as.character(`Day 1`)),
+    `Day 3` = as.character(`Day 3`),
+    Resolution = ifelse(is.na(Resolution), "—", as.character(Resolution))
+  )
+
+
+#------------------------------------------------------------
+# 5. Export formatted Excel file
+#------------------------------------------------------------
+
+wb <- createWorkbook()
+addWorksheet(wb, "Shared_Genes_Table")
+
+writeData(
+  wb,
+  sheet = "Shared_Genes_Table",
+  clean_transition_table
+)
+
+header_style <- createStyle(
+  textDecoration = "bold",
+  halign = "center",
+  valign = "center",
+  fgFill = "#D9EAF7",
+  border = "Bottom"
+)
+
+addStyle(
+  wb,
+  sheet = "Shared_Genes_Table",
+  style = header_style,
+  rows = 1,
+  cols = 1:ncol(clean_transition_table),
+  gridExpand = TRUE
+)
+
+wrap_style <- createStyle(
+  wrapText = TRUE,
+  valign = "top"
+)
+
+addStyle(
+  wb,
+  sheet = "Shared_Genes_Table",
+  style = wrap_style,
+  rows = 2:(nrow(clean_transition_table) + 1),
+  cols = 1:ncol(clean_transition_table),
+  gridExpand = TRUE
+)
+
+setColWidths(wb, "Shared_Genes_Table", cols = 1, widths = 24)
+setColWidths(wb, "Shared_Genes_Table", cols = 2, widths = 14)
+setColWidths(wb, "Shared_Genes_Table", cols = 3, widths = 20)
+setColWidths(wb, "Shared_Genes_Table", cols = 4:7, widths = 12)
+setColWidths(wb, "Shared_Genes_Table", cols = 8, widths = 75)
+
+freezePane(
+  wb,
+  "Shared_Genes_Table",
+  firstRow = TRUE
+)
+
+saveWorkbook(
+  wb,
+  "/Users/chhugani/Desktop/Hallmark_Shared_Genes_Clean_Table_UPDATED.xlsx",
+  overwrite = TRUE
+)
+
+clean_transition_table
+```
+
+
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# -----------------------------
+# 1. Enter pathway counts
+# -----------------------------
+
+pathway_counts <- tribble(
+  ~Pathway, ~Persistent_Day1, ~Resolving_Day1, ~Persistent_Day3, ~Resolving_Day3, ~Persistent_Resolution, ~Resolving_Resolution,
+  "Inflammatory Response", 23, 6, 33, 7, 7, 3,
+  "Glycolysis", 18, 6, 27, 8, 14, 4,
+  "TNFA/NFκB Signaling", 17, 5, 37, 8, 15, 3,
+  "Complement", 14, 10, 43, 12, 10, 2,
+  "IFNγ Response", 8, 2, 82, 9, 4, 6,
+  "OXPHOS", 10, 2, 62, 1, 17, 0,
+  "Reactive Oxygen Species", 3, 1, 12, 2, 10, 1,
+  "Coagulation", 9, 4, 12, 6, 13, 2
+)
+
+pathway_order <- c(
+  "Inflammatory Response",
+  "Glycolysis",
+  "TNFA/NFκB Signaling",
+  "Complement",
+  "IFNγ Response",
+  "OXPHOS",
+  "Reactive Oxygen Species",
+  "Coagulation"
+)
+
+plot_df <- pathway_counts %>%
+  pivot_longer(
+    cols = -Pathway,
+    names_to = "Group_Stage",
+    values_to = "Gene_Count"
+  ) %>%
+  separate(Group_Stage, into = c("Group", "Stage"), sep = "_") %>%
+  mutate(
+    Pathway = factor(Pathway, levels = pathway_order),
+    Stage = recode(Stage, Day1 = "Day 1", Day3 = "Day 3"),
+    Stage = factor(Stage, levels = c("Day 1", "Day 3", "Resolution"))
+  )
+
+# -----------------------------
+# 2. Persistent panel
+# -----------------------------
+
+persistent_df <- plot_df %>%
+  filter(Group == "Persistent")
+
+p_persistent <- ggplot(
+  persistent_df,
+  aes(x = Pathway, y = Gene_Count, fill = Stage)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65
+  ) +
+  geom_text(
+    aes(label = Gene_Count),
+    position = position_dodge(width = 0.75),
+    vjust = -0.35,
+    size = 3.3
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Day 1" = "#F4A3A3",
+      "Day 3" = "#E34242",
+      "Resolution" = "#9E0B16"
+    )
+  ) +
+  coord_cartesian(ylim = c(0, 90)) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "A. Persistent",
+    x = NULL,
+    y = "Number of upregulated\nHallmark pathway-associated genes",
+    fill = "Disease stage"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.title.y = element_text(size = 14),
+    legend.position = "bottom"
+  )
+
+# -----------------------------
+# 3. Resolving panel
+# -----------------------------
+
+resolving_df <- plot_df %>%
+  filter(Group == "Resolving")
+
+p_resolving <- ggplot(
+  resolving_df,
+  aes(x = Pathway, y = Gene_Count, fill = Stage)
+) +
+  geom_col(
+    position = position_dodge(width = 0.75),
+    width = 0.65
+  ) +
+  geom_text(
+    aes(label = Gene_Count),
+    position = position_dodge(width = 0.75),
+    vjust = -0.35,
+    size = 3.3
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Day 1" = "#9ADDDD",
+      "Day 3" = "#2FAFB0",
+      "Resolution" = "#006D6F"
+    )
+  ) +
+  coord_cartesian(ylim = c(0, 90)) +
+  theme_classic(base_size = 14) +
+  labs(
+    title = "B. Resolving",
+    x = NULL,
+    y = NULL,
+    fill = "Disease stage"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    legend.position = "bottom"
+  )
+
+# -----------------------------
+# 4. Combine panels
+# -----------------------------
+
+figure_1 <- (p_persistent | p_resolving) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 12)
+  )
+
+figure_1
+
+# -----------------------------
+# 5. Save figure
+# -----------------------------
+
+ggsave(
+  filename = "/Users/chhugani/Downloads/Figure1_Hallmark_Pathway_Gene_Counts.png",
+  plot = figure_1,
+  width = 14,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = "/Users/chhugani/Downloads/Figure1_Hallmark_Pathway_Gene_Counts.pdf",
+  plot = figure_1,
+  width = 14,
+  height = 7
+)
+```
+
+```{r}
+library(tidyverse)
+
+# -----------------------------
+# 1. Enter pathway counts
+# -----------------------------
+
+pathway_counts <- tribble(
+  ~Pathway, ~Persistent_Day1, ~Resolving_Day1, ~Persistent_Day3, ~Resolving_Day3, ~Persistent_Resolution, ~Resolving_Resolution,
+  "Inflammatory Response", 23, 6, 33, 7, 7, 3,
+  "Glycolysis", 18, 6, 27, 8, 14, 4,
+  "TNFA/NFκB Signaling", 17, 5, 37, 8, 15, 3,
+  "Complement", 14, 10, 43, 12, 10, 2,
+  "IFNγ Response", 8, 2, 82, 9, 4, 6,
+  "OXPHOS", 10, 2, 62, 1, 17, 0,
+  "Reactive Oxygen Species", 3, 1, 12, 2, 10, 1,
+  "Coagulation", 9, 4, 12, 6, 13, 2
+)
+
+pathway_order <- c(
+  "Inflammatory Response",
+  "Glycolysis",
+  "TNFA/NFκB Signaling",
+  "Complement",
+  "IFNγ Response",
+  "OXPHOS",
+  "Reactive Oxygen Species",
+  "Coagulation"
+)
+
+plot_df <- pathway_counts %>%
+  pivot_longer(
+    cols = -Pathway,
+    names_to = "Group_Stage",
+    values_to = "Gene_Count"
+  ) %>%
+  separate(Group_Stage, into = c("Group", "Stage"), sep = "_") %>%
+  mutate(
+    Pathway = factor(Pathway, levels = pathway_order),
+    Stage = recode(Stage, Day1 = "Day 1", Day3 = "Day 3"),
+    Stage = factor(Stage, levels = c("Day 1", "Day 3", "Resolution")),
+    Group = factor(Group, levels = c("Persistent", "Resolving")),
+    Fill_Group = paste(Group, Stage, sep = "_")
+  )
+
+# -----------------------------
+# 2. Single 2D grouped bar plot
+# -----------------------------
+
+figure_1 <- ggplot(
+  plot_df,
+  aes(
+    x = Pathway,
+    y = Gene_Count,
+    fill = Fill_Group
+  )
+) +
+  geom_col(
+    position = position_dodge2(width = 0.85, preserve = "single"),
+    width = 0.72
+  ) +
+  geom_text(
+    aes(label = Gene_Count),
+    position = position_dodge2(width = 0.85, preserve = "single"),
+    vjust = -0.35,
+    size = 3.1
+  ) +
+  scale_fill_manual(
+  breaks = c(
+    "Persistent_Day 1",
+    "Persistent_Day 3",
+    "Persistent_Resolution",
+    "Resolving_Day 1",
+    "Resolving_Day 3",
+    "Resolving_Resolution"
+  ),
+  values = c(
+    "Persistent_Day 1" = "#F6B5B5",
+    "Persistent_Day 3" = "#E74C3C",
+    "Persistent_Resolution" = "#A50F15",
+    "Resolving_Day 1" = "#BDD7EE",
+    "Resolving_Day 3" = "#5B9BD5",
+    "Resolving_Resolution" = "#1F4E79"
+  ),
+  labels = c(
+    "Persistent – Day 1",
+    "Persistent – Day 3",
+    "Persistent – Resolution",
+    "Resolving – Day 1",
+    "Resolving – Day 3",
+    "Resolving – Resolution"
+  )
+) +
+  coord_cartesian(ylim = c(0, 90)) +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "",
+    y = "Number of upregulated\nHallmark pathway-associated genes",
+    fill = "Group and disease stage"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.title.y = element_text(size = 14),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 11)
+) +
+guides(
+  fill = guide_legend(
+    ncol = 2,
+    byrow = FALSE
+  )
+)
+
+figure_1
+
+# -----------------------------
+# 3. Save figure
+# -----------------------------
+
+ggsave(
+  filename = "/Users/chhugani/Downloads/Figure1_Hallmark_Pathway_Gene_Counts_single_2D.png",
+  plot = figure_1,
+  width = 14,
+  height = 7,
+  dpi = 300
+)
+
+ggsave(
+  filename = "/Users/chhugani/Downloads/Figure1_Hallmark_Pathway_Gene_Counts_single_2D.pdf",
+  plot = figure_1,
+  width = 14,
+  height = 7
+)
+```
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# --------------------------------------------------
+# 1. Enter pathway counts
+# --------------------------------------------------
+
+pathway_counts <- tribble(
+  ~Pathway, ~Persistent_Day1, ~Resolving_Day1,
+  ~Persistent_Day3, ~Resolving_Day3,
+  ~Persistent_Resolution, ~Resolving_Resolution,
+
+  "Inflammatory\nResponse",       23, 6, 33, 7, 7, 3,
+  "TNFα/NFκB\nSignaling",         17, 5, 37, 8, 15, 3,
+  "Complement",                   14, 10, 43, 12, 10, 2,
+  "IFNγ\nResponse",                8, 2, 82, 9, 4, 6,
+  "Reactive Oxygen\nSpecies",      3, 1, 12, 2, 10, 1,
+  "Glycolysis",                   18, 6, 27, 8, 14, 4,
+  "OXPHOS",                       10, 2, 62, 1, 17, 0,
+  "Coagulation",                   9, 4, 12, 6, 13, 2
+)
+
+# --------------------------------------------------
+# 2. Convert to long format
+# --------------------------------------------------
+
+plot_df <- pathway_counts %>%
+  pivot_longer(
+    cols = -Pathway,
+    names_to = "Group_Stage",
+    values_to = "Gene_Count"
+  ) %>%
+  separate(
+    Group_Stage,
+    into = c("Group", "Stage"),
+    sep = "_"
+  ) %>%
+  mutate(
+    Stage = recode(
+      Stage,
+      Day1 = "Day 1",
+      Day3 = "Day 3",
+      Resolution = "Resolution"
+    ),
+    Group = factor(
+      Group,
+      levels = c("Persistent", "Resolving")
+    ),
+    Stage = factor(
+      Stage,
+      levels = c("Day 1", "Day 3", "Resolution")
+    ),
+    Group_Stage = factor(
+      paste(Group, Stage, sep = "_"),
+      levels = c(
+        "Persistent_Day 1",
+        "Persistent_Day 3",
+        "Persistent_Resolution",
+        "Resolving_Day 1",
+        "Resolving_Day 3",
+        "Resolving_Resolution"
+      )
+    )
+  )
+
+# --------------------------------------------------
+# 3. Define pathway groups
+# --------------------------------------------------
+
+immune_pathways <- c(
+  "Inflammatory\nResponse",
+  "TNFα/NFκB\nSignaling",
+  "Complement",
+  "IFNγ\nResponse",
+  "Reactive Oxygen\nSpecies"
+)
+
+metabolic_pathways <- c(
+  "Glycolysis",
+  "OXPHOS",
+  "Coagulation"
+)
+
+immune_df <- plot_df %>%
+  filter(Pathway %in% immune_pathways) %>%
+  mutate(
+    Pathway = factor(Pathway, levels = immune_pathways)
+  )
+
+metabolic_df <- plot_df %>%
+  filter(Pathway %in% metabolic_pathways) %>%
+  mutate(
+    Pathway = factor(Pathway, levels = metabolic_pathways)
+  )
+
+# --------------------------------------------------
+# 4. Colors and legend labels
+# --------------------------------------------------
+
+group_colors <- c(
+  "Persistent_Day 1"      = "#F4A6A6",
+  "Persistent_Day 3"      = "#EF4B35",
+  "Persistent_Resolution" = "#981B45",
+  "Resolving_Day 1"       = "#BDD7EE",
+  "Resolving_Day 3"       = "#5B9BD5",
+  "Resolving_Resolution"  = "#1F4E79"
+)
+
+group_labels <- c(
+  "Persistent_Day 1"      = "Persistent Day 1",
+  "Persistent_Day 3"      = "Persistent Day 3",
+  "Persistent_Resolution" = "Persistent Resolution",
+  "Resolving_Day 1"       = "Resolving Day 1",
+  "Resolving_Day 3"       = "Resolving Day 3",
+  "Resolving_Resolution"  = "Resolving Resolution"
+)
+
+# --------------------------------------------------
+# 5. Shared theme
+# --------------------------------------------------
+
+shared_theme <- theme_classic(base_size = 13) +
+  theme(
+    plot.title = element_text(
+      face = "bold",
+      hjust = 0.5,
+      size = 14,
+      margin = margin(b = 10)
+    ),
+    axis.text.x = element_text(
+      angle = 35,
+      hjust = 1,
+      vjust = 1,
+      size = 10.5
+    ),
+    axis.text.y = element_text(size = 10.5),
+    axis.title.y = element_text(
+      face = "bold",
+      size = 12,
+      margin = margin(r = 10)
+    ),
+    legend.position = "top",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 10),
+    legend.key.size = unit(0.7, "cm"),
+    legend.spacing.x = unit(0.25, "cm"),
+    legend.margin = margin(b = 8),
+    legend.box.margin = margin(b = 8),
+    panel.grid.major.y = element_line(
+      color = "grey85",
+      linetype = "dashed",
+      linewidth = 0.4
+    ),
+    panel.grid.minor = element_blank()
+  )
+
+# --------------------------------------------------
+# 6. Panel A: immune and inflammatory pathways
+# --------------------------------------------------
+
+p_immune <- ggplot(
+  immune_df,
+  aes(
+    x = Pathway,
+    y = Gene_Count,
+    fill = Group_Stage
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.82),
+    width = 0.72,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_text(
+    aes(label = Gene_Count),
+    position = position_dodge(width = 0.82),
+    vjust = -0.4,
+    size = 3
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    breaks = names(group_colors),
+    labels = group_labels,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 90),
+    breaks = seq(0, 90, by = 10),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    title = "A. Immune and inflammatory pathways",
+    x = NULL,
+    y = "Number of upregulated\nHallmark pathway-associated genes"
+  ) +
+  shared_theme
+
+# --------------------------------------------------
+# 7. Panel B: metabolic pathways
+# --------------------------------------------------
+
+p_metabolic <- ggplot(
+  metabolic_df,
+  aes(
+    x = Pathway,
+    y = Gene_Count,
+    fill = Group_Stage
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.82),
+    width = 0.72,
+    color = "black",
+    linewidth = 0.3
+  ) +
+  geom_text(
+    aes(label = Gene_Count),
+    position = position_dodge(width = 0.82),
+    vjust = -0.4,
+    size = 3
+  ) +
+  scale_fill_manual(
+    values = group_colors,
+    breaks = names(group_colors),
+    labels = group_labels,
+    drop = FALSE
+  ) +
+  scale_y_continuous(
+    limits = c(0, 90),
+    breaks = seq(0, 90, by = 10),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    title = "B. Metabolic pathways",
+    x = NULL,
+    y = NULL
+  ) +
+  shared_theme +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.line.y = element_blank()
+  )
+
+# --------------------------------------------------
+# 8. Combine panels
+# --------------------------------------------------
+
+figure_1 <- (
+  p_immune + p_metabolic +
+    plot_layout(
+      widths = c(1.6, 1),
+      guides = "collect"
+    )
+) &
+  theme(
+    legend.position = "top"
+  ) &
+  guides(
+    fill = guide_legend(
+      nrow = 2,
+      byrow = TRUE
+    )
+  )
+
+figure_1
+
+# --------------------------------------------------
+# 9. Save figure
+# --------------------------------------------------
+
+ggsave(
+  filename = "/Users/Chhugani/Downloads/Figure1_Hallmark_Pathways_TwoPanels_Clean.png",
+  plot = figure_1,
+  width = 14,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+
+ggsave(
+  filename = "/Users/Chhugani/Downloads/Figure1_Hallmark_Pathways_TwoPanels_Clean.pdf",
+  plot = figure_1,
+  width = 14,
+  height = 7,
+  bg = "white"
+)
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(janitor)
+
+# Load one-row-per-patient metadata
+metadata <- read_excel(
+  "/Users/chhugani/Downloads/SAB_Metadata_Dogra_3.24.26.xlsx"
+) %>%
+  clean_names()
+
+# Load longitudinal WBC file
+wbc <- read.csv(
+  "/Users/chhugani/Downloads/SAB_WBC_Dogra.csv",
+  check.names = FALSE
+) %>%
+  clean_names()
+
+# Extract numeric day from the timepoint text
+wbc_day1 <- wbc %>%
+  mutate(
+    day = as.numeric(
+      str_extract(
+        sample_timepoints_included_in_our_study,
+        "(?<=Day )\\d+"
+      )
+    )
+  ) %>%
+  filter(day == 1) %>%
+  select(
+    study_id,
+    platelet_day1 = platelet,
+    neutrophil_percent_day1 = neutrophil_percent,
+    lymphocyte_percent_day1 = lymphocyte_percent,
+    monocyte_percent_day1 = monocyte_percent
+  )
+
+# Merge Day 1 labs onto the full metadata
+patient_table1 <- metadata %>%
+  left_join(wbc_day1, by = "study_id")
+
+# Check counts
+table(patient_table1$persistent_or_resolving)
+
+patient_table1 %>%
+  summarise(
+    platelet_available = sum(!is.na(platelet_day1)),
+    neutrophil_available = sum(!is.na(neutrophil_percent_day1)),
+    lymphocyte_available = sum(!is.na(lymphocyte_percent_day1)),
+    monocyte_available = sum(!is.na(monocyte_percent_day1))
+  )
+
+patient_table1 %>%
+  group_by(persistent_or_resolving) %>%
+  summarise(
+    total_patients = n(),
+    platelet_available = sum(!is.na(platelet_day1)),
+    neutrophil_available = sum(!is.na(neutrophil_percent_day1)),
+    lymphocyte_available = sum(!is.na(lymphocyte_percent_day1)),
+    monocyte_available = sum(!is.na(monocyte_percent_day1))
+  )
+
+patient_table1 %>%
+  filter(is.na(persistent_or_resolving)) %>%
+  select(study_id, red_cap_id, persistent_or_resolving)
+
+patient_table1 <- patient_table1 %>%
+  filter(
+    !is.na(study_id),
+    !is.na(persistent_or_resolving),
+    red_cap_id != "New patients"
+  )
+
+
+table(patient_table1$persistent_or_resolving, useNA = "ifany")
+nrow(patient_table1)
+
+patient_table1 <- patient_table1 %>%
+  filter(
+    persistent_or_resolving %in% c("Persistent", "Resolving")
+  )
+
+table(patient_table1$persistent_or_resolving)
+nrow(patient_table1)
+```
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+library(gtsummary)
+library(flextable)
+
+# --------------------------------------------------
+# 1. Keep only classified patients
+# --------------------------------------------------
+
+patient_table1 <- patient_table1 %>%
+  filter(
+    persistent_or_resolving %in% c("Persistent", "Resolving")
+  )
+
+# Confirm final cohort
+table(patient_table1$persistent_or_resolving)
+nrow(patient_table1)
+
+table1_data <- patient_table1 %>%
+  transmute(
+    status = factor(
+      str_trim(persistent_or_resolving),
+      levels = c("Resolving", "Persistent")
+    ),
+
+    # Demographics
+    age = as.numeric(age),
+
+    sex = factor(
+      str_trim(sex),
+      levels = c("Male", "Female")
+    ),
+
+    # Microbiology
+    microbiology = factor(
+      str_trim(mrsa_mssa),
+      levels = c("MSSA", "MRSA")
+    ),
+
+    # Source risk
+    source_risk = case_when(
+      str_detect(
+        source_risk_category_low_medium_high,
+        regex("^Low", ignore_case = TRUE)
+      ) ~ "Low",
+
+      str_detect(
+        source_risk_category_low_medium_high,
+        regex("^Intermediate|^Medium", ignore_case = TRUE)
+      ) ~ "Intermediate",
+
+      str_detect(
+        source_risk_category_low_medium_high,
+        regex("^High", ignore_case = TRUE)
+      ) ~ "High",
+
+      TRUE ~ NA_character_
+    ),
+
+    # Top three comorbidities
+    hypertension = case_when(
+      str_detect(
+        comorbidities,
+        regex("(^|,\\s*)HTN($|,)|hypertension", ignore_case = TRUE)
+      ) ~ "Yes",
+      TRUE ~ "No"
+    ),
+
+    diabetes_mellitus = case_when(
+      str_detect(
+        comorbidities,
+        regex("diabetes|\\bDM\\b", ignore_case = TRUE)
+      ) ~ "Yes",
+      TRUE ~ "No"
+    ),
+
+    renal_disease = case_when(
+      str_detect(
+        comorbidities,
+        regex(
+          "renal disease|kidney disease|\\bCKD\\b|\\bESRD\\b",
+          ignore_case = TRUE
+        )
+      ) ~ "Yes",
+      TRUE ~ "No"
+    ),
+
+    # Day 1 laboratory values
+    platelet_count = parse_number(
+      as.character(platelet_day1)
+    ),
+
+    neutrophil_percent = parse_number(
+      as.character(neutrophil_percent_day1)
+    ),
+
+    lymphocyte_percent = parse_number(
+      as.character(lymphocyte_percent_day1)
+    ),
+
+    monocyte_percent = parse_number(
+      as.character(monocyte_percent_day1)
+    ),
+
+    # Clinical characteristics
+    icu_stay = case_when(
+      str_detect(
+        icu_stay,
+        regex("^Yes", ignore_case = TRUE)
+      ) ~ "Yes",
+
+      str_detect(
+        icu_stay,
+        regex("^No", ignore_case = TRUE)
+      ) ~ "No",
+
+      TRUE ~ NA_character_
+    ),
+
+    duration_bacteremia = as.numeric(
+      duration_of_bacteremia
+    ),
+
+    # Outcomes
+    mortality_30_day = case_when(
+      str_detect(
+        x30_day_mortality,
+        regex("^Yes", ignore_case = TRUE)
+      ) ~ "Yes",
+
+      str_detect(
+        x30_day_mortality,
+        regex("^No", ignore_case = TRUE)
+      ) ~ "No",
+
+      TRUE ~ NA_character_
+    ),
+
+    mortality_90_day = case_when(
+      str_detect(
+        x90_day_mortality,
+        regex("^Yes", ignore_case = TRUE)
+      ) ~ "Yes",
+
+      str_detect(
+        x90_day_mortality,
+        regex("^No", ignore_case = TRUE)
+      ) ~ "No",
+
+      TRUE ~ NA_character_
+    )
+  ) %>%
+
+  mutate(
+    source_risk = factor(
+      source_risk,
+      levels = c("Low", "Intermediate", "High")
+    ),
+
+    hypertension = factor(
+      hypertension,
+      levels = c("No", "Yes")
+    ),
+
+    diabetes_mellitus = factor(
+      diabetes_mellitus,
+      levels = c("No", "Yes")
+    ),
+
+    renal_disease = factor(
+      renal_disease,
+      levels = c("No", "Yes")
+    ),
+
+    icu_stay = factor(
+      icu_stay,
+      levels = c("No", "Yes")
+    ),
+
+    mortality_30_day = factor(
+      mortality_30_day,
+      levels = c("No", "Yes")
+    ),
+
+    mortality_90_day = factor(
+      mortality_90_day,
+      levels = c("No", "Yes")
+    )
+  )
+
+glimpse(table1_data)
+
+table(table1_data$status)
+
+table(table1_data$microbiology, useNA = "ifany")
+
+table(table1_data$source_risk, useNA = "ifany")
+
+table1_data %>%
+  summarise(
+    hypertension = sum(hypertension == "Yes"),
+    diabetes_mellitus = sum(diabetes_mellitus == "Yes"),
+    renal_disease = sum(renal_disease == "Yes")
+  )
+
+table1_data %>%
+  group_by(status) %>%
+  summarise(
+    total_patients = n(),
+    platelet_available = sum(!is.na(platelet_count)),
+    neutrophil_available = sum(!is.na(neutrophil_percent)),
+    lymphocyte_available = sum(!is.na(lymphocyte_percent)),
+    monocyte_available = sum(!is.na(monocyte_percent))
+  )
+```
+```{r}
+table1_data %>%
+  filter(
+    status == "Resolving",
+    is.na(platelet_count),
+    !is.na(neutrophil_percent)
+  ) %>%
+  select(
+    status,
+    platelet_count,
+    neutrophil_percent,
+    lymphocyte_percent,
+    monocyte_percent
+  )
+```
+
+```{r}
+table1 <- table1_data %>%
+          # remove study ID from the table
+  tbl_summary(
+
+    by = status,
+
+    statistic = list(
+      age ~ "{mean} ± {sd}",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "{median} ({p25}, {p75})",
+
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+
+    type = list(
+      sex ~ "dichotomous",
+      microbiology ~ "categorical",
+      source_risk ~ "categorical",
+      hypertension ~ "dichotomous",
+      diabetes_mellitus ~ "dichotomous",
+      renal_disease ~ "dichotomous",
+      icu_stay ~ "dichotomous",
+      mortality_30_day ~ "dichotomous",
+      mortality_90_day ~ "dichotomous"
+    ),
+
+    value = list(
+      sex ~ "Female",
+      hypertension ~ "Yes",
+      diabetes_mellitus ~ "Yes",
+      renal_disease ~ "Yes",
+      icu_stay ~ "Yes",
+      mortality_30_day ~ "Yes",
+      mortality_90_day ~ "Yes"
+    ),
+
+    label = list(
+      age ~ "Age, years",
+      sex ~ "Female",
+
+      microbiology ~ "Microbiology",
+      source_risk ~ "Source risk of SAB",
+
+      hypertension ~ "Hypertension",
+      diabetes_mellitus ~ "Diabetes mellitus",
+      renal_disease ~ "Renal disease",
+
+      platelet_count ~ "Platelet count (Day 1)",
+      neutrophil_percent ~ "Neutrophil % (Day 1)",
+      lymphocyte_percent ~ "Lymphocyte % (Day 1)",
+      monocyte_percent ~ "Monocyte % (Day 1)",
+
+      icu_stay ~ "ICU stay",
+      duration_bacteremia ~ "Duration of bacteremia, days",
+
+      mortality_30_day ~ "30-day mortality",
+      mortality_90_day ~ "90-day mortality"
+    ),
+
+    digits = list(
+      age ~ 1,
+      platelet_count ~ 1,
+      neutrophil_percent ~ 1,
+      lymphocyte_percent ~ 1,
+      monocyte_percent ~ 1,
+      duration_bacteremia ~ 1
+    ),
+
+    missing = "no"
+
+  ) %>%
+
+  add_p(
+
+    test = list(
+
+      age ~ "t.test",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "wilcox.test",
+
+      all_categorical() ~ "fisher.test"
+
+    ),
+
+    pvalue_fun = label_style_pvalue(digits = 3)
+
+  ) %>%
+
+  modify_header(
+    label ~ "**Patient characteristics**",
+    stat_1 ~ "**Resolving**\nN = {n}",
+    stat_2 ~ "**Persistent**\nN = {n}",
+    p.value ~ "**P value**"
+  ) %>%
+
+  bold_labels()
+
+table1
+```
+```{r}
+table1 %>%
+  as_flex_table() %>%
+  save_as_docx(
+    path = "/Users/chhugani/Downloads/Table1_Patient_Characteristics.docx"
+  )
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(gtsummary)
+library(flextable)
+
+# --------------------------------------------------
+# 1. Remove the two non-patient rows
+# --------------------------------------------------
+
+patient_table1_clean <- patient_table1 %>%
+  filter(
+    persistent_or_resolving %in% c("Persistent", "Resolving")
+  )
+
+# Confirm both datasets now have 51 rows
+nrow(patient_table1_clean)
+nrow(table1_data)
+
+stopifnot(
+  nrow(table1_data) == nrow(patient_table1_clean)
+)
+
+# --------------------------------------------------
+# 2. Add ICU admission within 48 h
+# --------------------------------------------------
+
+table1_data <- table1_data %>%
+  mutate(
+    icu_48h = case_when(
+      str_detect(
+        patient_table1_clean$icu_admission_within_48_h,
+        regex("^Yes", ignore_case = TRUE)
+      ) ~ "Yes",
+
+      str_detect(
+        patient_table1_clean$icu_admission_within_48_h,
+        regex("^No", ignore_case = TRUE)
+      ) ~ "No",
+
+      TRUE ~ NA_character_
+    ),
+
+    icu_48h = factor(
+      icu_48h,
+      levels = c("No", "Yes")
+    )
+  )
+
+# Verify the new variable
+table(
+  table1_data$status,
+  table1_data$icu_48h,
+  useNA = "ifany"
+)
+
+# --------------------------------------------------
+# 3. Recreate Table 1
+# --------------------------------------------------
+
+table1 <- table1_data %>%
+  tbl_summary(
+    by = status,
+
+    statistic = list(
+      age ~ "{mean} ± {sd}",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "{median} ({p25}, {p75})",
+
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+
+    type = list(
+      sex ~ "dichotomous",
+      microbiology ~ "categorical",
+      source_risk ~ "categorical",
+      hypertension ~ "dichotomous",
+      diabetes_mellitus ~ "dichotomous",
+      renal_disease ~ "dichotomous",
+      icu_48h ~ "dichotomous",
+      mortality_30_day ~ "dichotomous",
+      mortality_90_day ~ "dichotomous"
+    ),
+
+    value = list(
+      sex ~ "Female",
+      hypertension ~ "Yes",
+      diabetes_mellitus ~ "Yes",
+      renal_disease ~ "Yes",
+      icu_48h ~ "Yes",
+      mortality_30_day ~ "Yes",
+      mortality_90_day ~ "Yes"
+    ),
+
+    label = list(
+      age ~ "Age, years",
+      sex ~ "Female",
+      microbiology ~ "Microbiology",
+      source_risk ~ "Source risk of SAB",
+      hypertension ~ "Hypertension",
+      diabetes_mellitus ~ "Diabetes mellitus",
+      renal_disease ~ "Renal disease",
+      platelet_count ~ "Platelet count (Day 1)",
+      neutrophil_percent ~ "Neutrophil % (Day 1)",
+      lymphocyte_percent ~ "Lymphocyte % (Day 1)",
+      monocyte_percent ~ "Monocyte % (Day 1)",
+      icu_48h ~ "ICU admission within 48 h",
+      duration_bacteremia ~ "Duration of bacteremia, days",
+      mortality_30_day ~ "30-day mortality",
+      mortality_90_day ~ "90-day mortality"
+    ),
+
+    digits = list(
+      age ~ 1,
+      platelet_count ~ 1,
+      neutrophil_percent ~ 1,
+      lymphocyte_percent ~ 1,
+      monocyte_percent ~ 1,
+      duration_bacteremia ~ 1
+    ),
+
+    missing = "no"
+  ) %>%
+
+  add_p(
+    test = list(
+      age ~ "t.test",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "wilcox.test",
+
+      all_categorical() ~ "fisher.test"
+    ),
+
+    pvalue_fun = label_style_pvalue(digits = 3)
+  ) %>%
+
+  modify_header(
+    label ~ "**Patient characteristics**",
+    stat_1 ~ "**Resolving**\nN = {n}",
+    stat_2 ~ "**Persistent**\nN = {n}",
+    p.value ~ "**P value**"
+  ) %>%
+
+  bold_labels()
+
+table1
+
+# --------------------------------------------------
+# 4. Export to Word
+# --------------------------------------------------
+
+table1 %>%
+  as_flex_table() %>%
+  save_as_docx(
+    path = "/Users/chhugani/Downloads/Table1_Patient_Characteristics_Updated.docx"
+  )
+```
+
+```{r}
+table1_data <- table1_data %>%
+  mutate(
+    icu_48h = case_when(
+      icu_48h == "Yes" ~ "Yes",
+      TRUE ~ "No"
+    ),
+    icu_48h = factor(
+      icu_48h,
+      levels = c("No", "Yes")
+    )
+  )
+
+icu_48h = case_when(
+  str_detect(
+    patient_table1_clean$icu_admission_within_48_h,
+    regex("^Yes", ignore_case = TRUE)
+  ) ~ "Yes",
+
+  TRUE ~ "No"
+)
+
+table(table1_data$icu_48h)
+
+table(
+  table1_data$status,
+  table1_data$icu_48h
+)
+```
+
+```{r}
+
+table(
+  table1_data$status,
+  table1_data$mortality_30_day,
+  useNA = "ifany"
+)
+
+table(
+  table1_data$status,
+  table1_data$mortality_90_day,
+  useNA = "ifany"
+)
+
+
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(gtsummary)
+library(flextable)
+
+# --------------------------------------------------
+# 1. Remove the two non-patient rows
+# --------------------------------------------------
+
+patient_table1_clean <- patient_table1 %>%
+  filter(
+    persistent_or_resolving %in% c("Persistent", "Resolving")
+  )
+
+# Confirm both datasets now have 51 rows
+nrow(patient_table1_clean)
+nrow(table1_data)
+
+stopifnot(
+  nrow(table1_data) == nrow(patient_table1_clean)
+)
+
+# --------------------------------------------------
+# 2. Add ICU admission within 48 h
+# --------------------------------------------------
+
+table1_data <- table1_data %>%
+  mutate(
+    icu_48h = case_when(
+      str_detect(
+        patient_table1_clean$icu_admission_within_48_h,
+        regex("^Yes", ignore_case = TRUE)
+      ) ~ "Yes",
+
+      str_detect(
+        patient_table1_clean$icu_admission_within_48_h,
+        regex("^No", ignore_case = TRUE)
+      ) ~ "No",
+
+      TRUE ~ NA_character_
+    ),
+
+    icu_48h = factor(
+      icu_48h,
+      levels = c("No", "Yes")
+    )
+  )
+
+# Verify the new variable
+table(
+  table1_data$status,
+  table1_data$icu_48h,
+  useNA = "ifany"
+)
+
+# --------------------------------------------------
+# 3. Recreate Table 1
+# --------------------------------------------------
+
+table1 <- table1_data %>%
+  tbl_summary(
+    by = status,
+
+    statistic = list(
+      age ~ "{mean} ± {sd}",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "{median} ({p25}, {p75})",
+
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+
+    type = list(
+      sex ~ "dichotomous",
+      microbiology ~ "categorical",
+      source_risk ~ "categorical",
+      hypertension ~ "dichotomous",
+      diabetes_mellitus ~ "dichotomous",
+      renal_disease ~ "dichotomous",
+      icu_48h ~ "dichotomous",
+      mortality_30_day ~ "dichotomous",
+      mortality_90_day ~ "dichotomous"
+    ),
+
+    value = list(
+      sex ~ "Female",
+      hypertension ~ "Yes",
+      diabetes_mellitus ~ "Yes",
+      renal_disease ~ "Yes",
+      icu_48h ~ "Yes",
+      mortality_30_day ~ "Yes",
+      mortality_90_day ~ "Yes"
+    ),
+
+    label = list(
+      age ~ "Age, years",
+      sex ~ "Female",
+      microbiology ~ "Microbiology",
+      source_risk ~ "Source risk of SAB",
+      hypertension ~ "Hypertension",
+      diabetes_mellitus ~ "Diabetes mellitus",
+      renal_disease ~ "Renal disease",
+      platelet_count ~ "Platelet count (Day 1)",
+      neutrophil_percent ~ "Neutrophil % (Day 1)",
+      lymphocyte_percent ~ "Lymphocyte % (Day 1)",
+      monocyte_percent ~ "Monocyte % (Day 1)",
+      icu_48h ~ "ICU admission within 48 h",
+      duration_bacteremia ~ "Duration of bacteremia, days",
+      mortality_30_day ~ "30-day mortality",
+      mortality_90_day ~ "90-day mortality"
+    ),
+
+    digits = list(
+      age ~ 1,
+      platelet_count ~ 1,
+      neutrophil_percent ~ 1,
+      lymphocyte_percent ~ 1,
+      monocyte_percent ~ 1,
+      duration_bacteremia ~ 1
+    ),
+
+    missing = "no"
+  ) %>%
+
+  add_p(
+    test = list(
+      age ~ "t.test",
+
+      c(
+        platelet_count,
+        neutrophil_percent,
+        lymphocyte_percent,
+        monocyte_percent,
+        duration_bacteremia
+      ) ~ "wilcox.test",
+
+      all_categorical() ~ "fisher.test"
+    ),
+
+    pvalue_fun = label_style_pvalue(digits = 3)
+  ) %>%
+
+  modify_header(
+    label ~ "**Patient characteristics**",
+    stat_1 ~ "**Resolving**\nN = {n}",
+    stat_2 ~ "**Persistent**\nN = {n}",
+    p.value ~ "**P value**"
+  ) %>%
+
+  bold_labels()
+
+# --------------------------------------------------
+# 4. Update mortality rows with explicit denominators
+# --------------------------------------------------
+
+table1 <- table1 %>%
+  modify_table_body(
+    ~ .x %>%
+      mutate(
+        stat_1 = case_when(
+          label == "30-day mortality" ~ "1/33 (3.0%)",
+          label == "90-day mortality" ~ "2/23 (8.7%)",
+          TRUE ~ stat_1
+        ),
+        stat_2 = case_when(
+          label == "30-day mortality" ~ "1/18 (5.6%)",
+          label == "90-day mortality" ~ "3/15 (20.0%)",
+          TRUE ~ stat_2
+        )
+      )
+  )
+
+# --------------------------------------------------
+# 5. Export to Word
+# --------------------------------------------------
+
+table1 %>%
+  as_flex_table() %>%
+  add_footer_lines(
+    values = "Percentages for 90-day mortality are calculated among patients with available follow-up data (Resolving, n = 23; Persistent, n = 15)."
+  ) %>%
+  save_as_docx(
+    path = "/Users/chhugani/Downloads/Table1_Patient_Characteristics_Updated.docx"
+  )
+```
+
+```{r}
+table(table1_data$icu_48h, useNA = "ifany")
+
+```
+
+```{r}
+table(
+  table1_data$status,
+  table1_data$icu_48h,
+  useNA = "ifany"
+)
+```
+```{r}
+table(
+  patient_table1_clean$icu_admission_within_48_h,
+  useNA = "ifany"
+)
+```
+
+
+```{r}
+table(
+  patient_table1_clean$persistent_or_resolving,
+  patient_table1_clean$icu_admission_within_48_h,
+  useNA = "ifany"
+)
+```
+
+```{r}
+sort(unique(patient_table1_clean$icu_admission_within_48_h))
+
+```
+
+
+```{r}
+
+table1_data <- table1_data %>%
+  mutate(
+    icu_48h = case_when(
+      patient_table1_clean$icu_admission_within_48_h == "Yes" ~ "Yes",
+      patient_table1_clean$icu_admission_within_48_h %in% c("No", "N/A") ~ "No",
+      TRUE ~ NA_character_
+    ),
+    icu_48h = factor(icu_48h, levels = c("No", "Yes"))
+  )
+
+table(table1_data$icu_48h, useNA = "ifany")
+
+table(
+  table1_data$status,
+  table1_data$icu_48h,
+  useNA = "ifany"
+)
+```
+
+```{r}
+# ==========================================================
+# Verify pathway-member entries vs unique genes
+# ==========================================================
+
+library(dplyr)
+
+# Significant pathway genes only
+day1_sig <- day1_pathway_results %>%
+  filter(!is.na(pvalue), pvalue < 0.05)
+
+# ----------------------------------------------------------
+# Overall counts
+# ----------------------------------------------------------
+
+cat("\n==============================\n")
+cat("Overall counts\n")
+cat("==============================\n")
+
+cat("Total pathway-member gene entries:",
+    nrow(day1_sig), "\n")
+
+cat("Unique genes:",
+    n_distinct(day1_sig$Gene_clean), "\n")
+
+# ----------------------------------------------------------
+# Persistent
+# ----------------------------------------------------------
+
+persistent_sig <- day1_sig %>%
+  filter(Direction == "Higher in Persistent")
+
+cat("\n==============================\n")
+cat("Higher in Persistent\n")
+cat("==============================\n")
+
+cat("Pathway-member gene entries:",
+    nrow(persistent_sig), "\n")
+
+cat("Unique genes:",
+    n_distinct(persistent_sig$Gene_clean), "\n")
+
+# ----------------------------------------------------------
+# Resolving
+# ----------------------------------------------------------
+
+resolving_sig <- day1_sig %>%
+  filter(Direction == "Higher in Resolving")
+
+cat("\n==============================\n")
+cat("Higher in Resolving\n")
+cat("==============================\n")
+
+cat("Pathway-member gene entries:",
+    nrow(resolving_sig), "\n")
+
+cat("Unique genes:",
+    n_distinct(resolving_sig$Gene_clean), "\n")
+
+# ==========================================================
+# Counts by pathway
+# ==========================================================
+
+persistent_counts <- persistent_sig %>%
+  count(Pathway, name = "Gene_entries") %>%
+  arrange(desc(Gene_entries))
+
+resolving_counts <- resolving_sig %>%
+  count(Pathway, name = "Gene_entries") %>%
+  arrange(desc(Gene_entries))
+
+cat("\n==============================\n")
+cat("Persistent pathway counts\n")
+cat("==============================\n")
+
+print(persistent_counts)
+
+cat("\nSum:",
+    sum(persistent_counts$Gene_entries), "\n")
+
+cat("\n==============================\n")
+cat("Resolving pathway counts\n")
+cat("==============================\n")
+
+print(resolving_counts)
+
+cat("\nSum:",
+    sum(resolving_counts$Gene_entries), "\n")
+
+# ==========================================================
+# Complement pathway verification
+# ==========================================================
+
+cat("\n==============================\n")
+cat("Resolving - Complement pathway\n")
+cat("==============================\n")
+
+resolving_sig %>%
+  filter(Pathway == "Complement") %>%
+  arrange(Gene_clean) %>%
+  select(Gene_clean,
+         log2FoldChange,
+         pvalue,
+         padj) %>%
+  print(n = Inf)
+
+cat("\nComplement summary\n")
+
+resolving_sig %>%
+  filter(Pathway == "Complement") %>%
+  summarise(
+    Gene_entries = n(),
+    Unique_genes = n_distinct(Gene_clean)
+  ) %>%
+  print()
+
+# ==========================================================
+# Genes present in multiple Hallmark pathways
+# ==========================================================
+
+cat("\n==============================\n")
+cat("Persistent genes in multiple pathways\n")
+cat("==============================\n")
+
+persistent_sig %>%
+  group_by(Gene_clean) %>%
+  summarise(
+    Number_of_pathways = n_distinct(Pathway),
+    Pathways = paste(sort(unique(Pathway)),
+                     collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(Number_of_pathways > 1) %>%
+  arrange(desc(Number_of_pathways), Gene_clean) %>%
+  print(n = Inf)
+
+cat("\n==============================\n")
+cat("Resolving genes in multiple pathways\n")
+cat("==============================\n")
+
+resolving_sig %>%
+  group_by(Gene_clean) %>%
+  summarise(
+    Number_of_pathways = n_distinct(Pathway),
+    Pathways = paste(sort(unique(Pathway)),
+                     collapse = "; "),
+    .groups = "drop"
+  ) %>%
+  filter(Number_of_pathways > 1) %>%
+  arrange(desc(Number_of_pathways), Gene_clean) %>%
+  print(n = Inf)
+```
+
